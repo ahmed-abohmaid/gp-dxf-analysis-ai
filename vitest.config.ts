@@ -18,7 +18,7 @@ export default defineConfig({
       include: [
         "src/lib/**/*.ts",
         "src/hooks/**/*.ts",
-        "src/features/**/*.tsx",
+        "src/features/**/*.{ts,tsx}",
         "src/server/**/*.ts",
       ],
       exclude: ["**/*.test.*", "**/*.d.ts"],

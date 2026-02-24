@@ -2,9 +2,9 @@
 
 import { ResultsDisplay } from "@/features/results/ResultsDisplay";
 import { FileUpload } from "@/features/upload/FileUpload";
+import { useProcessDxf } from "@/features/upload/hooks/useProcessDxf";
 import { Footer } from "@/components/layout/Footer";
 import { Header } from "@/components/layout/Header";
-import { useProcessDxf } from "@/hooks/useProcessDxf";
 
 export default function HomePage() {
   const { mutate, data, isPending, reset, error } = useProcessDxf();
@@ -12,7 +12,7 @@ export default function HomePage() {
   const hasResults = data?.success && (data.rooms?.length ?? 0) > 0;
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-slate-100">
+    <div className="min-h-screen bg-linear-to-br from-slate-50 via-blue-50 to-slate-100">
       <Header showReset={!!hasResults} onReset={reset} />
 
       <main className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">

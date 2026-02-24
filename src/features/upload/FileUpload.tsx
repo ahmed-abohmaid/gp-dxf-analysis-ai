@@ -4,10 +4,10 @@ import { useRef, useState } from "react";
 
 import { FileText, Loader2, Upload, X } from "lucide-react";
 
+import { validateDxfFile } from "@/features/upload/utils/validateDxfFile";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
-import { validateDxfFile } from "@/lib/utils/validateDxfFile";
 import { MAX_UPLOAD_SIZE_MB } from "@/shared/constants";
 
 interface FileUploadProps {

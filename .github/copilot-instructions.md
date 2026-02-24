@@ -75,8 +75,11 @@ Next.js 16 App Router app that processes AutoCAD DXF files into electrical load 
 
 - `src/server/` — server-only; never import in client components
 - `src/shared/` — wire types and constants shared across the boundary (`DxfRoom`, `DxfProcessResult`, `MAX_UPLOAD_SIZE_BYTES`)
-- `src/features/` — React feature components (`FileUpload`, `ResultsDisplay`)
-- `src/hooks/` — TanStack Query wrappers (`useCustomMutation`, `useProcessDxf`)
+- `src/features/<name>/` — React feature components; each feature owns its feature-specific hooks and utils:
+  - `src/features/<name>/hooks/` — hooks used only by this feature (e.g. `features/upload/hooks/useProcessDxf.ts`)
+  - `src/features/<name>/utils/` — utils used only by this feature (e.g. `features/upload/utils/validateDxfFile.ts`)
+- `src/hooks/` — generic TanStack Query wrappers shared across features (`useCustomMutation`, `useCustomQuery`)
+- `src/lib/` — generic utilities shared across features (`normalizeError`, `pushToasters`, `utils`)
 - `src/components/ui/` — shadcn/ui primitives (new-york style)
 
 ## Build and Test

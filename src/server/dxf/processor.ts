@@ -160,9 +160,11 @@ export async function processDxfFile(content: string): Promise<DxfGeometryResult
       }
     }
 
-    // ── Extract LWPOLYLINE / POLYLINE entities ────────────────────────────────
+    // ── Extract LWPOLYLINE entities ────────────────────────────────────────────────
+    // POLYLINE is the legacy heavyweight entity type (3D meshes, polyfaces) — excluded
+    // intentionally to match the Python reference and avoid duplicates.
     for (const entity of dxf.entities) {
-      if (entity.type !== "LWPOLYLINE" && entity.type !== "POLYLINE") continue;
+      if (entity.type !== "LWPOLYLINE") continue;
       try {
         const e = entity as unknown as DxfEntity;
         const verts = e.vertices ?? [];
@@ -178,7 +180,9 @@ export async function processDxfFile(content: string): Promise<DxfGeometryResult
         }
 
         const polygon = new Flatten.Polygon(points);
-        polylines.push({ polygon, rawArea: polygon.area() });
+        // Math.abs — Flatten.js returns signed area (negative for CW-wound polygons);
+        // Shapely always returns unsigned area. Match Python behaviour.
+        polylines.push({ polygon, rawArea: Math.abs(polygon.area()) });
       } catch {
         // skip malformed polyline
       }

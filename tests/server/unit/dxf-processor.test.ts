@@ -180,4 +180,60 @@ describe("processDxfFile", () => {
     expect(result.success).toBe(true);
     expect(result.rawRooms[0].name).toBe("ROOM");
   });
+
+  it("ignores POLYLINE entities — only LWPOLYLINE is processed", async () => {
+    // Same geometry as ROOM_VERTS but as a (legacy) POLYLINE entity.
+    // It must NOT produce a room — preventing duplicates when CAD exports both types.
+    const legacyPolyline = { type: "POLYLINE", vertices: ROOM_VERTS };
+    const dxf = buildMockDxf([
+      polylineEntity(ROOM_VERTS), // LWPOLYLINE — should produce one room
+      legacyPolyline, // POLYLINE — must be ignored
+      textEntity("BEDROOM", 2, 1.5),
+    ]);
+    const result = await processDxfFile(dxf);
+    expect(result.success).toBe(true);
+    expect(result.rawRooms).toHaveLength(1); // not 2
+    expect(result.rawRooms[0].name).toBe("BEDROOM");
+  });
+
+  it("extracts rooms from clockwise-wound polygons (positive area)", async () => {
+    // CW winding = reversed vertex order.  Flatten.js would return negative area
+    // without Math.abs() — these rooms would be silently filtered by the < 0.2 check.
+    const cwVerts = [
+      { x: 0, y: 3 },
+      { x: 4, y: 3 },
+      { x: 4, y: 0 },
+      { x: 0, y: 0 },
+    ];
+    const dxf = buildMockDxf([polylineEntity(cwVerts), textEntity("KITCHEN", 2, 1.5)]);
+    const result = await processDxfFile(dxf);
+    expect(result.success).toBe(true);
+    expect(result.rawRooms).toHaveLength(1);
+    expect(result.rawRooms[0].area).toBeCloseTo(12, 1);
+    expect(result.rawRooms[0].name).toBe("KITCHEN");
+  });
+
+  it("POLYLINE entities do not skew unit detection", async () => {
+    // A POLYLINE junk entity with huge coordinates would push the sample average
+    // above MM_THRESHOLD and flip the unit decision to millimetres.
+    // Since POLYLINE is ignored, only the LWPOLYLINE metre-scale room is sampled.
+    const polylineJunk = {
+      type: "POLYLINE",
+      vertices: [
+        { x: 0, y: 0 },
+        { x: 10_000, y: 0 },
+        { x: 10_000, y: 10_000 },
+        { x: 0, y: 10_000 },
+      ],
+    };
+    const dxf = buildMockDxf([
+      polylineEntity(ROOM_VERTS), // 12 m² LWPOLYLINE — metres
+      polylineJunk, // huge POLYLINE — must be ignored
+      textEntity("OFFICE", 2, 1.5),
+    ]);
+    const result = await processDxfFile(dxf);
+    expect(result.success).toBe(true);
+    expect(result.unitsDetected).toMatch(/meter/i); // NOT millimeters
+    expect(result.rawRooms[0].area).toBeCloseTo(12, 1);
+  });
 });

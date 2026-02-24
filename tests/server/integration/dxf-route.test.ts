@@ -23,9 +23,10 @@ const mockClassifyRooms = vi.mocked(classifierModule.classifyRooms);
 
 const VALID_GEOMETRY = {
   success: true,
-  rawRooms: [{ id: 1, name: "BEDROOM", area: 12 }],
+  rawRooms: [{ id: 1, name: "BEDROOM", area: 12, allLabels: ["BEDROOM"] }],
   totalRooms: 1,
   unitsDetected: "Meters",
+  layersUsed: { boundary: [], text: [] },
   timestamp: new Date().toISOString(),
 };
 
@@ -33,10 +34,13 @@ const VALID_CLASSIFICATIONS = [
   {
     roomLabel: "BEDROOM",
     roomType: "Bedroom",
+    customerCategory: "C1",
     // AI returns densities; server multiplies by room area
-    lightingDensity: 22, // VA/m² — SBC 401 §2.2
-    socketsDensity: 10, // VA/m² — SBC 401 §2.2
-    codeReference: "SBC 401 §2.2",
+    lightingDensity: 22, // VA/m² — DPS-01 §10.0
+    socketsDensity: 10, // VA/m² — DPS-01 §10.0
+    demandFactor: 0.6,
+    coincidentFactor: 1.0,
+    codeReference: "Section 10.0, DPS-01",
   },
 ];
 
@@ -131,6 +135,7 @@ describe("POST /api/dxf", () => {
       rawRooms: [],
       totalRooms: 0,
       unitsDetected: "Unknown",
+      layersUsed: { boundary: [], text: [] },
       timestamp: "",
       error: "Invalid DXF structure",
     });
@@ -146,6 +151,7 @@ describe("POST /api/dxf", () => {
       rawRooms: [],
       totalRooms: 0,
       unitsDetected: "Meters",
+      layersUsed: { boundary: [], text: [] },
       timestamp: "",
     });
     const fd = makeFormData();
@@ -166,7 +172,8 @@ describe("POST /api/dxf", () => {
     expect(body.rooms).toHaveLength(1);
     expect(body.rooms[0].lightingLoad).toBeNull();
     expect(body.rooms[0].socketsLoad).toBeNull();
-    expect(body.rooms[0].totalLoad).toBeNull();
+    expect(body.rooms[0].connectedLoad).toBeNull();
+    expect(body.rooms[0].demandLoad).toBeNull();
     expect(body.rooms[0].error).toMatch(/AI classification failed/i);
     expect(body.hasFailedRooms).toBe(true);
   });
@@ -177,7 +184,10 @@ describe("POST /api/dxf", () => {
     const res = await POST(makeRequest(fd));
     // RAG failure is silenced — AI still runs with empty context
     expect(res.status).toBe(200);
-    expect(mockClassifyRooms).toHaveBeenCalledWith([{ name: "BEDROOM", area: 12 }], "");
+    expect(mockClassifyRooms).toHaveBeenCalledWith(
+      [{ name: "BEDROOM", area: 12, allLabels: ["BEDROOM"] }],
+      "",
+    );
   });
 
   // ── Happy path ─────────────────────────────────────────────────────────────
@@ -191,14 +201,21 @@ describe("POST /api/dxf", () => {
     expect(body.rooms).toHaveLength(1);
     expect(body.rooms[0].name).toBe("BEDROOM");
     expect(body.rooms[0].type).toBe("Bedroom");
+    expect(body.rooms[0].customerCategory).toBe("C1");
     // Server computes: lightingLoad = density × area = 22 × 12 = 264 VA
     //                  socketsLoad  = density × area = 10 × 12 = 120 VA
-    //                  totalLoad    = 264 + 120 = 384 VA
+    //                  connectedLoad = 264 + 120 = 384 VA
     expect(body.rooms[0].lightingLoad).toBe(264);
     expect(body.rooms[0].socketsLoad).toBe(120);
-    expect(body.rooms[0].totalLoad).toBe(384);
-    expect(body.totalLoad).toBe(384);
-    expect(body.totalLoadKVA).toBe(0.38);
+    expect(body.rooms[0].connectedLoad).toBe(384);
+    // demandLoad = connectedLoad × demandFactor × coincidentFactor = 384 × 0.6 × 1.0 = 230.4
+    expect(body.rooms[0].demandFactor).toBe(0.6);
+    expect(body.rooms[0].coincidentFactor).toBe(1.0);
+    expect(body.rooms[0].demandLoad).toBe(230.4);
+    // Building totals
+    expect(body.totalConnectedLoad).toBe(384);
+    expect(body.totalDemandLoad).toBe(230.4);
+    expect(body.effectiveDemandFactor).toBe(0.6);
     expect(body.hasFailedRooms).toBe(false);
     expect(body.timestamp).toBeTruthy();
   });
@@ -207,11 +224,12 @@ describe("POST /api/dxf", () => {
     mockProcessDxf.mockResolvedValue({
       success: true,
       rawRooms: [
-        { id: 1, name: "BEDROOM", area: 10 },
-        { id: 2, name: "BEDROOM", area: 20 },
+        { id: 1, name: "BEDROOM", area: 10, allLabels: ["BEDROOM"] },
+        { id: 2, name: "BEDROOM", area: 20, allLabels: ["BEDROOM"] },
       ],
       totalRooms: 2,
       unitsDetected: "Meters",
+      layersUsed: { boundary: [], text: [] },
       timestamp: new Date().toISOString(),
     });
     // AI returns the density once for the deduplicated "BEDROOM" label
@@ -219,43 +237,51 @@ describe("POST /api/dxf", () => {
       {
         roomLabel: "BEDROOM",
         roomType: "Bedroom",
+        customerCategory: "C1",
         lightingDensity: 22,
         socketsDensity: 10,
-        codeReference: "SBC 401 §2.2",
+        demandFactor: 0.6,
+        coincidentFactor: 1.0,
+        codeReference: "Section 10.0, DPS-01",
       },
     ]);
     const res = await POST(makeRequest(makeFormData()));
     expect(res.status).toBe(200);
     const body = await res.json();
-    // room 1: 22×10=220 lighting, 10×10=100 sockets, total=320
+    // room 1: 22×10=220 lighting, 10×10=100 sockets, connectedLoad=320
     expect(body.rooms[0].lightingLoad).toBe(220);
     expect(body.rooms[0].socketsLoad).toBe(100);
-    expect(body.rooms[0].totalLoad).toBe(320);
-    // room 2: 22×20=440 lighting, 10×20=200 sockets, total=640
+    expect(body.rooms[0].connectedLoad).toBe(320);
+    // room 2: 22×20=440 lighting, 10×20=200 sockets, connectedLoad=640
     expect(body.rooms[1].lightingLoad).toBe(440);
     expect(body.rooms[1].socketsLoad).toBe(200);
-    expect(body.rooms[1].totalLoad).toBe(640);
-    expect(body.totalLoad).toBe(960);
+    expect(body.rooms[1].connectedLoad).toBe(640);
+    // totalConnectedLoad = 320 + 640 = 960
+    expect(body.totalConnectedLoad).toBe(960);
   });
 
-  it("resolves ditto-mark labels to the nearest preceding named room", async () => {
+  it("resolves ditto-mark labels and replaces display name with resolved label", async () => {
     mockProcessDxf.mockResolvedValue({
       success: true,
       rawRooms: [
-        { id: 1, name: "BEDROOM", area: 12 },
-        { id: 2, name: '"', area: 8 }, // ditto — should resolve to BEDROOM
+        { id: 1, name: "BEDROOM", area: 12, allLabels: ["BEDROOM"] },
+        { id: 2, name: '"', area: 8, allLabels: ['"'] }, // ditto — should resolve to BEDROOM
       ],
       totalRooms: 2,
       unitsDetected: "Meters",
+      layersUsed: { boundary: [], text: [] },
       timestamp: new Date().toISOString(),
     });
     mockClassifyRooms.mockResolvedValue([
       {
         roomLabel: "BEDROOM",
         roomType: "Bedroom",
+        customerCategory: "C1",
         lightingDensity: 22,
         socketsDensity: 10,
-        codeReference: "SBC 401 §2.2",
+        demandFactor: 0.6,
+        coincidentFactor: 1.0,
+        codeReference: "Section 10.0, DPS-01",
       },
     ]);
     const res = await POST(makeRequest(makeFormData()));
@@ -263,11 +289,51 @@ describe("POST /api/dxf", () => {
     const body = await res.json();
     // Both rooms should classify via the BEDROOM density
     expect(body.rooms[1].type).toBe("Bedroom");
-    // Original DXF label is preserved for display
-    expect(body.rooms[1].name).toBe('"');
+    // Ditto display name is now replaced with the resolved label
+    expect(body.rooms[1].name).toBe("BEDROOM");
     // Load computed with ditto room's own area (8 m²)
     expect(body.rooms[1].lightingLoad).toBe(176); // 22 × 8
     expect(body.rooms[1].socketsLoad).toBe(80); // 10 × 8
-    expect(body.rooms[1].totalLoad).toBe(256);
+    expect(body.rooms[1].connectedLoad).toBe(256);
+  });
+
+  // ── Factor flow ────────────────────────────────────────────────────────────
+
+  it("demand and coincident factors < 1 reduce totalDemandLoad below totalConnectedLoad", async () => {
+    mockProcessDxf.mockResolvedValue({
+      success: true,
+      rawRooms: [{ id: 1, name: "BEDROOM", area: 20, allLabels: ["BEDROOM"] }],
+      totalRooms: 1,
+      unitsDetected: "Meters",
+      layersUsed: { boundary: [], text: [] },
+      timestamp: new Date().toISOString(),
+    });
+    mockClassifyRooms.mockResolvedValue([
+      {
+        roomLabel: "BEDROOM",
+        roomType: "Bedroom",
+        customerCategory: "C1",
+        lightingDensity: 58, // 40 % of 145 VA/m²
+        socketsDensity: 87, // 60 % of 145 VA/m²
+        demandFactor: 0.6,
+        coincidentFactor: 0.8,
+        codeReference: "Table 2, DPS-01",
+      },
+    ]);
+    const res = await POST(makeRequest(makeFormData()));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    // connectedLoad = (58 + 87) × 20 = 145 × 20 = 2900 VA
+    expect(body.rooms[0].connectedLoad).toBe(2900);
+    expect(body.rooms[0].demandFactor).toBe(0.6);
+    expect(body.rooms[0].coincidentFactor).toBe(0.8);
+    // demandLoad = 2900 × 0.6 × 0.8 = 1392 VA
+    expect(body.rooms[0].demandLoad).toBe(1392);
+    // Building totals must reflect the reduction
+    expect(body.totalConnectedLoad).toBe(2900);
+    expect(body.totalDemandLoad).toBe(1392);
+    expect(body.totalDemandLoad).toBeLessThan(body.totalConnectedLoad);
+    // effectiveDemandFactor = 1392 / 2900 ≈ 0.48
+    expect(body.effectiveDemandFactor).toBe(0.48);
   });
 });

@@ -1,7 +1,8 @@
 /**
  * Prebuild script: Embeds the full SBC 401 PDF into Supabase pgvector.
  * Run via: npm run prebuild  (or: tsx scripts/build-supabase-index.ts)
- * Pass --force to clear existing documents before rebuilding.
+ * To force a rebuild: npm run prebuild:force  (or: tsx scripts/build-supabase-index.ts --force)
+ * NOTE: `npm run prebuild --force` does NOT work — npm intercepts `--force` before it reaches the script.
  *
  * Prerequisites:
  *   1. Create a Supabase project at https://supabase.com (free tier works)

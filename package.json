@@ -7,6 +7,7 @@
     "build": "next build",
     "start": "next start",
     "prebuild": "tsx scripts/build-supabase-index.ts",
+    "prebuild:force": "tsx scripts/build-supabase-index.ts --force",
     "lint": "eslint . --max-warnings 0",
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",

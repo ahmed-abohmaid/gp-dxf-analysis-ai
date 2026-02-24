@@ -98,7 +98,7 @@ npm run lint                # ESLint (0 warnings allowed)
 npm run format              # Prettier
 ```
 
-**Supabase index** is built from `public/saudi-code/Load Estimation for Saudi Code.pdf` into the `documents` table in Supabase pgvector. Pass `--force` to `tsx scripts/build-supabase-index.ts` to rebuild.
+**Supabase index** is built from `public/saudi-code/Load Estimation for Saudi Code.pdf` into the `documents` table in Supabase pgvector. Run `npm run prebuild:force` (or `tsx scripts/build-supabase-index.ts --force`) to force a rebuild. Do NOT use `npm run prebuild --force` — npm intercepts `--force` before it reaches the script.
 
 ## Code Style
 

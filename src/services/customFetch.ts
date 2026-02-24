@@ -1,4 +1,4 @@
-export type FetchError = {
+type FetchError = {
   message: string;
   status: number;
   errorBody?: unknown;

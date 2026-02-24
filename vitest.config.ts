@@ -3,14 +3,31 @@ import path from "path";
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vitest/config";
 
+const alias = { "@": path.resolve(__dirname, "./src") };
+const setupFiles = ["./tests/setup.ts"];
+
 export default defineConfig({
   plugins: [react()],
   test: {
     globals: true,
-    setupFiles: ["./tests/setup.ts"],
-    environmentMatchGlobs: [
-      ["tests/client/**", "jsdom"],
-      ["tests/server/**", "node"],
+    setupFiles,
+    projects: [
+      {
+        test: {
+          name: "client",
+          environment: "jsdom",
+          include: ["tests/client/**/*.test.{ts,tsx}"],
+        },
+        resolve: { alias },
+      },
+      {
+        test: {
+          name: "server",
+          environment: "node",
+          include: ["tests/server/**/*.test.ts"],
+        },
+        resolve: { alias },
+      },
     ],
     coverage: {
       provider: "v8",
@@ -24,9 +41,5 @@ export default defineConfig({
       exclude: ["**/*.test.*", "**/*.d.ts"],
     },
   },
-  resolve: {
-    alias: {
-      "@": path.resolve(__dirname, "./src"),
-    },
-  },
+  resolve: { alias },
 });

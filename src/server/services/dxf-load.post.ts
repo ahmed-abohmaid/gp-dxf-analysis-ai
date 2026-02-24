@@ -1,18 +1,23 @@
 import { round2 } from "@/lib/utils";
 import { classifyRooms } from "@/server/ai/classifier";
 import { processDxfFile } from "@/server/dxf/processor";
+import { buildRagQueries } from "@/server/rag/query-builder";
 import { searchSaudiCode } from "@/server/rag/saudi-code-loader";
+import { computeBuildingSummary } from "@/server/services/factors-calculator";
+import { normalizeRoomKey } from "@/server/utils/normalize";
 import { MAX_UPLOAD_SIZE_BYTES, MAX_UPLOAD_SIZE_MB } from "@/shared/constants";
 import type { DxfProcessResult, DxfRoom } from "@/shared/types/dxf";
 
 /**
  * POST /api/dxf
  *
- * Two-phase pipeline:
- *   1. Geometry  — processDxfFile() extracts room polygons + areas from DXF content
- *   2. AI + RAG  — classifyRooms() classifies each unique room using DPS-01 sections
- *                  retrieved from the Supabase pgvector store; returns VA/m² densities which
- *                  the server multiplies by each room's actual area for absolute loads
+ * Six-step Saudi Code pipeline:
+ *   1. Read the CAD file — extract room boundaries and labels from DXF content
+ *   2. Calculate area for each boundary in m²
+ *   3. AI + RAG — classify rooms against DPS-01 and assign load densities (VA/m²)
+ *   4. Compute connected load per room (density × area)
+ *   5. Apply demand and coincident factors per room
+ *   6. Compute final building totals with category breakdown
  *
  * Rooms that fail AI classification are included in the response with null load values.
  */
@@ -49,6 +54,7 @@ export async function POST(req: Request): Promise<Response> {
     return errorResponse("Could not read file content", 422);
   }
 
+  // ── Step 1 & 2: Parse DXF, extract rooms with areas ─────────────────────
   const geometry = await processDxfFile(content);
 
   if (!geometry.success) {
@@ -65,7 +71,7 @@ export async function POST(req: Request): Promise<Response> {
   // ── Ditto-mark resolution ──────────────────────────────────────────────────
   // AutoCAD drawings sometimes use " (ditto) as a label meaning "same as the
   // room above". Resolve each occurrence to the nearest preceding named label
-  // so the AI receives a meaningful name; the original label is preserved for display.
+  // AND replace the display name so users see a meaningful label.
   const DITTO_RE = /^["\u201C\u201D']+$/;
   const resolvedLabels = geometry.rawRooms.map((r, i, arr) => {
     if (!DITTO_RE.test(r.name.trim())) return r.name;
@@ -75,41 +81,68 @@ export async function POST(req: Request): Promise<Response> {
     return r.name; // no prior named room found — keep as-is
   });
 
+  // Replace ditto display names with the resolved label
+  for (let i = 0; i < geometry.rawRooms.length; i++) {
+    if (DITTO_RE.test(geometry.rawRooms[i].name.trim())) {
+      geometry.rawRooms[i].name = resolvedLabels[i];
+    }
+  }
+
   // Unique room types sent to AI — deduplicated by resolved label (case-insensitive)
   const uniqueRoomInputs = Array.from(
     new Map(
       geometry.rawRooms.map((r, i) => [
-        resolvedLabels[i].toUpperCase().trim(),
-        { name: resolvedLabels[i], area: r.area },
+        normalizeRoomKey(resolvedLabels[i]),
+        { name: resolvedLabels[i], area: r.area, allLabels: r.allLabels },
       ]),
     ).values(),
   );
 
+  // ── Step 3: RAG retrieval + AI classification ────────────────────────────
   let codeContext = "";
   try {
     const roomNames = uniqueRoomInputs.map((r) => r.name);
-    // Query uses exact DPS-01 section headings and terminology so embeddings
-    // score well against the indexed PDF chunks.
-    const ragResults = await searchSaudiCode(
-      `connected loads estimation normal residential dwelling C1 load density VA sq m customer category facility type: ${roomNames.join(", ")}`,
-      10,
-    );
-    codeContext = ragResults.map((r) => r.content).join("\n\n---\n\n");
+    // Three focused queries run in parallel — one for load densities, one for demand
+    // factor tables (Table 2/3), one for coincident/diversity factor tables.
+    // A single monolithic query produces a smeared embedding that scores poorly against
+    // any specific section; targeted queries retrieve each topic independently.
+    const queries = buildRagQueries(roomNames);
+    const ragResultSets = await Promise.all(queries.map((q) => searchSaudiCode(q, 5)));
+    // Flatten and deduplicate chunks by content so identical hits don't inflate the prompt
+    const seenContent = new Set<string>();
+    codeContext = ragResultSets
+      .flat()
+      .filter(({ content }) =>
+        seenContent.has(content) ? false : (seenContent.add(content), true),
+      )
+      .map((r) => r.content)
+      .join("\n\n---\n\n");
   } catch {
-    // RAG unavailable — AI will receive empty context and return 0-load rooms per prompt rules
+    console.error("[POST /api/dxf] RAG retrieval failed — AI will receive empty context");
   }
 
-  const aiClassifications = await classifyRooms(uniqueRoomInputs, codeContext);
+  let aiClassifications: Awaited<ReturnType<typeof classifyRooms>> = [];
+  try {
+    aiClassifications = await classifyRooms(uniqueRoomInputs, codeContext);
+  } catch (err) {
+    console.error("[POST /api/dxf] AI classification failed:", err);
+    aiClassifications = [];
+  }
 
-  const classMap = new Map(aiClassifications.map((c) => [c.roomLabel.toUpperCase().trim(), c]));
+  const classMap = new Map(aiClassifications.map((c) => [normalizeRoomKey(c.roomLabel), c]));
 
-  let totalLoad = 0;
+  // ── Steps 4-5: Compute loads and apply factors per room ──────────────────
   let hasFailedRooms = false;
+  const roomLoadInputs: {
+    connectedLoad: number;
+    demandFactor: number;
+    coincidentFactor: number;
+    customerCategory: string;
+    roomType: string;
+  }[] = [];
 
-  // Multiply per-room area × AI-returned densities so duplicate room names with
-  // different areas each get their own correct absolute load values.
   const rooms: DxfRoom[] = geometry.rawRooms.map((raw, i) => {
-    const cls = classMap.get(resolvedLabels[i].toUpperCase().trim());
+    const cls = classMap.get(normalizeRoomKey(resolvedLabels[i]));
 
     if (!cls) {
       hasFailedRooms = true;
@@ -117,10 +150,16 @@ export async function POST(req: Request): Promise<Response> {
         id: raw.id,
         name: raw.name,
         type: "UNKNOWN",
+        customerCategory: "",
         area: raw.area,
+        lightingDensity: null,
+        socketsDensity: null,
         lightingLoad: null,
         socketsLoad: null,
-        totalLoad: null,
+        connectedLoad: null,
+        demandFactor: null,
+        coincidentFactor: null,
+        demandLoad: null,
         codeReference: "",
         error: "AI classification failed for this room",
       };
@@ -129,27 +168,50 @@ export async function POST(req: Request): Promise<Response> {
     // density × this room's actual area — correct even for duplicate room names
     const lightingLoad = round2(cls.lightingDensity * raw.area);
     const socketsLoad = round2(cls.socketsDensity * raw.area);
-    const roomTotal = round2(lightingLoad + socketsLoad);
+    const connectedLoad = round2(lightingLoad + socketsLoad);
 
-    totalLoad += roomTotal;
+    // Step 5: Apply demand and coincident factors
+    // Computed inline — computeBuildingSummary calls computeRoomDemandLoad internally,
+    // so calling it here too would double the computation.
+    const demandLoad = round2(connectedLoad * cls.demandFactor * cls.coincidentFactor);
+
+    roomLoadInputs.push({
+      connectedLoad,
+      demandFactor: cls.demandFactor,
+      coincidentFactor: cls.coincidentFactor,
+      customerCategory: cls.customerCategory,
+      roomType: cls.roomType,
+    });
 
     return {
       id: raw.id,
       name: raw.name,
       type: cls.roomType,
+      customerCategory: cls.customerCategory,
       area: raw.area,
+      lightingDensity: cls.lightingDensity,
+      socketsDensity: cls.socketsDensity,
       lightingLoad,
       socketsLoad,
-      totalLoad: roomTotal,
+      connectedLoad,
+      demandFactor: cls.demandFactor,
+      coincidentFactor: cls.coincidentFactor,
+      demandLoad,
       codeReference: cls.codeReference,
     };
   });
 
+  // ── Step 6: Building-level totals ────────────────────────────────────────
+  const summary = computeBuildingSummary(roomLoadInputs);
+
   const result: DxfProcessResult = {
     success: true,
     rooms,
-    totalLoad: round2(totalLoad),
-    totalLoadKVA: round2(totalLoad / 1000),
+    totalConnectedLoad: summary.totalConnectedLoad,
+    totalDemandLoad: summary.totalDemandLoad,
+    totalDemandLoadKVA: summary.totalDemandLoadKVA,
+    effectiveDemandFactor: summary.effectiveDemandFactor,
+    categoryBreakdown: summary.categoryBreakdown,
     totalRooms: rooms.length,
     unitsDetected: geometry.unitsDetected,
     hasFailedRooms,

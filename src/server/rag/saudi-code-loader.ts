@@ -1,9 +1,10 @@
 import { getVectorStore } from "@/server/rag/vector-store";
 
 // Minimum cosine similarity score to consider a retrieved chunk relevant.
-// Chunks below this threshold are discarded to prevent low-quality context
-// from confusing the classifier (e.g. unrelated SBC sections).
-const SIMILARITY_THRESHOLD = 0.5;
+// Lowered to 0.3 (from 0.5) to capture numeric-heavy demand/coincident factor
+// table chunks, which embed with lower semantic similarity scores than prose
+// sections because they contain mostly numbers rather than natural language.
+const SIMILARITY_THRESHOLD = 0.3;
 
 // Simple FIFO in-memory cache for identical RAG queries within a server process.
 // Eliminates redundant Gemini Embeddings API calls when the same room labels appear

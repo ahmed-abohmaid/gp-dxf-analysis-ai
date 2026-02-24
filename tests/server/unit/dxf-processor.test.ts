@@ -1,6 +1,6 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
-import { cleanText, pickLabel, processDxfFile } from "@/server/dxf/processor";
+import { cleanText, detectLayers, pickLabel, processDxfFile } from "@/server/dxf/processor";
 
 // ── cleanText ──────────────────────────────────────────────────────────────────
 
@@ -55,16 +55,57 @@ describe("pickLabel", () => {
     expect(pickLabel(["101", "BATHROOM"])).toBe("BATHROOM");
   });
 
-  it("skips tag-formatted labels (L1-, DT, DS)", () => {
+  it("prefers multi-word room names over short codes", () => {
     expect(pickLabel(["L1-ZONE", "LIVING ROOM"])).toBe("LIVING ROOM");
   });
 
-  it("falls back to first candidate if all are numeric/tags", () => {
+  it("falls back to first candidate if all are numeric", () => {
+    // Both score -100; stable sort keeps original order
     expect(pickLabel(["42", "99"])).toBe("42");
   });
 
-  it("handles mixed list — returns first non-numeric non-tag", () => {
+  it("picks highest-scored candidate from mixed list", () => {
     expect(pickLabel(["3.5", "DS", "MASTER BEDROOM", "LOUNGE"])).toBe("MASTER BEDROOM");
+  });
+
+  it("prefers room name over alphanumeric code (e.g. AZ451)", () => {
+    // AZ451 is a Revit sheet reference — should score lower than a real room name
+    expect(pickLabel(["AZ451", "BEDROOM"])).toBe("BEDROOM");
+  });
+
+  it("prefers descriptive name over short code", () => {
+    expect(pickLabel(["R306", "FIRE LOBBY"])).toBe("FIRE LOBBY");
+  });
+});
+
+// ── detectLayers ──────────────────────────────────────────────────────────────
+
+describe("detectLayers", () => {
+  it("detects boundary and text layers by pattern", () => {
+    const layers = ["Boundary Layer", "A-AREA-IDEN", "A-ANNO-SYMB", "0", "Defpoints"];
+    const result = detectLayers(layers);
+    expect(result.boundary).toContain("Boundary Layer");
+    expect(result.text).toContain("A-AREA-IDEN");
+    // Annotation layer should NOT be in text layers
+    expect(result.text).not.toContain("A-ANNO-SYMB");
+  });
+
+  it("falls back to all non-annotation layers when no text pattern matches", () => {
+    const layers = ["Boundary Layer", "Custom Layer", "A-ANNO-SYMB"];
+    const result = detectLayers(layers);
+    expect(result.boundary).toContain("Boundary Layer");
+    // "Custom Layer" should be included (not annotation), "A-ANNO-SYMB" excluded
+    expect(result.text).toContain("Custom Layer");
+    expect(result.text).not.toContain("A-ANNO-SYMB");
+  });
+
+  it("returns all layers when no patterns match at all", () => {
+    const layers = ["Layer1", "Layer2"];
+    const result = detectLayers(layers);
+    // No boundary pattern matched → empty (all layers accepted for polylines)
+    expect(result.boundary).toHaveLength(0);
+    // No text or annotation pattern matched → all layers used for text
+    expect(result.text).toEqual(["Layer1", "Layer2"]);
   });
 });
 
@@ -81,18 +122,31 @@ vi.mock("dxf-parser", () => {
 });
 
 /** Builds a minimal parsed-DXF object as dxf-parser would return it. */
-function buildMockDxf(entities: object[], header: Record<string, unknown> = {}) {
-  return JSON.stringify({ entities, header });
+function buildMockDxf(
+  entities: object[],
+  header: Record<string, unknown> = {},
+  layers?: Record<string, unknown>,
+) {
+  return JSON.stringify({
+    entities,
+    header,
+    ...(layers ? { tables: { layer: { layers } } } : {}),
+  });
 }
 
-/** A rectangle LWPOLYLINE with the given vertex coordinates. */
-function polylineEntity(verts: { x: number; y: number }[]): object {
-  return { type: "LWPOLYLINE", vertices: verts };
+/** A rectangle LWPOLYLINE with the given vertex coordinates and optional layer. */
+function polylineEntity(verts: { x: number; y: number }[], layer?: string): object {
+  return { type: "LWPOLYLINE", vertices: verts, ...(layer ? { layer } : {}) };
 }
 
-/** A TEXT entity at the given position. */
-function textEntity(text: string, x: number, y: number): object {
-  return { type: "TEXT", text, position: { x, y } };
+/** A legacy POLYLINE entity with the given vertex coordinates and optional layer. */
+function legacyPolylineEntity(verts: { x: number; y: number }[], layer?: string): object {
+  return { type: "POLYLINE", vertices: verts, ...(layer ? { layer } : {}) };
+}
+
+/** A TEXT entity at the given position with optional layer. */
+function textEntity(text: string, x: number, y: number, layer?: string): object {
+  return { type: "TEXT", text, position: { x, y }, ...(layer ? { layer } : {}) };
 }
 
 // 4m × 3m room bounding box (vertices in m — processed as-is because avg area < MM_THRESHOLD)
@@ -117,6 +171,33 @@ describe("processDxfFile", () => {
     expect(result.rawRooms).toHaveLength(1);
     expect(result.rawRooms[0].name).toBe("BEDROOM");
     expect(result.rawRooms[0].area).toBeCloseTo(12, 1);
+  });
+
+  it("includes allLabels array on each extracted room", async () => {
+    const dxf = buildMockDxf([
+      polylineEntity(ROOM_VERTS),
+      textEntity("BEDROOM", 2, 1.5),
+      textEntity("12.5", 2, 2),
+    ]);
+    const result = await processDxfFile(dxf);
+    expect(result.success).toBe(true);
+    expect(result.rawRooms[0].allLabels).toEqual(expect.arrayContaining(["BEDROOM", "12.5"]));
+    // Best label should still be BEDROOM (not the numeric one)
+    expect(result.rawRooms[0].name).toBe("BEDROOM");
+  });
+
+  it("returns layersUsed in result", async () => {
+    const layers = { "Boundary Layer": {}, "A-AREA-IDEN": {} };
+    const dxf = buildMockDxf(
+      [polylineEntity(ROOM_VERTS, "Boundary Layer"), textEntity("BEDROOM", 2, 1.5, "A-AREA-IDEN")],
+      {},
+      layers,
+    );
+    const result = await processDxfFile(dxf);
+    expect(result.success).toBe(true);
+    expect(result.layersUsed).toBeDefined();
+    expect(result.layersUsed.boundary).toContain("Boundary Layer");
+    expect(result.layersUsed.text).toContain("A-AREA-IDEN");
   });
 
   it("filters polygons smaller than 0.2 m²", async () => {
@@ -171,29 +252,45 @@ describe("processDxfFile", () => {
     expect(result.success).toBe(false);
   });
 
-  it("assigns fallback 'ROOM' label when text is outside all polygons", async () => {
+  it("assigns fallback 'ROOM' label when text is far outside all polygons", async () => {
     const dxf = buildMockDxf([
       polylineEntity(ROOM_VERTS),
-      textEntity("OUTSIDE", 100, 100), // far outside the polygon
+      textEntity("FARAWAY", 2000, 2000), // > 500 DXF units from polygon — beyond tolerance
     ]);
     const result = await processDxfFile(dxf);
     expect(result.success).toBe(true);
     expect(result.rawRooms[0].name).toBe("ROOM");
   });
 
-  it("ignores POLYLINE entities — only LWPOLYLINE is processed", async () => {
-    // Same geometry as ROOM_VERTS but as a (legacy) POLYLINE entity.
-    // It must NOT produce a room — preventing duplicates when CAD exports both types.
-    const legacyPolyline = { type: "POLYLINE", vertices: ROOM_VERTS };
+  it("processes legacy POLYLINE entities alongside LWPOLYLINE", async () => {
+    // Both LWPOLYLINE and POLYLINE should produce rooms
+    const room2Verts = [
+      { x: 10, y: 0 },
+      { x: 14, y: 0 },
+      { x: 14, y: 3 },
+      { x: 10, y: 3 },
+    ];
     const dxf = buildMockDxf([
-      polylineEntity(ROOM_VERTS), // LWPOLYLINE — should produce one room
-      legacyPolyline, // POLYLINE — must be ignored
+      polylineEntity(ROOM_VERTS),
+      legacyPolylineEntity(room2Verts),
+      textEntity("BEDROOM", 2, 1.5),
+      textEntity("KITCHEN", 12, 1.5),
+    ]);
+    const result = await processDxfFile(dxf);
+    expect(result.success).toBe(true);
+    expect(result.rawRooms).toHaveLength(2);
+  });
+
+  it("skips POLYLINE entities with shape flag (3D meshes)", async () => {
+    const meshEntity = { type: "POLYLINE", vertices: ROOM_VERTS, shape: true };
+    const dxf = buildMockDxf([
+      polylineEntity(ROOM_VERTS),
+      meshEntity,
       textEntity("BEDROOM", 2, 1.5),
     ]);
     const result = await processDxfFile(dxf);
     expect(result.success).toBe(true);
-    expect(result.rawRooms).toHaveLength(1); // not 2
-    expect(result.rawRooms[0].name).toBe("BEDROOM");
+    expect(result.rawRooms).toHaveLength(1); // mesh should be skipped
   });
 
   it("extracts rooms from clockwise-wound polygons (positive area)", async () => {
@@ -213,27 +310,21 @@ describe("processDxfFile", () => {
     expect(result.rawRooms[0].name).toBe("KITCHEN");
   });
 
-  it("POLYLINE entities do not skew unit detection", async () => {
-    // A POLYLINE junk entity with huge coordinates would push the sample average
-    // above MM_THRESHOLD and flip the unit decision to millimetres.
-    // Since POLYLINE is ignored, only the LWPOLYLINE metre-scale room is sampled.
-    const polylineJunk = {
-      type: "POLYLINE",
-      vertices: [
-        { x: 0, y: 0 },
-        { x: 10_000, y: 0 },
-        { x: 10_000, y: 10_000 },
-        { x: 0, y: 10_000 },
+  it("filters text by layer when annotation layer is detected", async () => {
+    const layers = { "Boundary Layer": {}, "A-AREA-IDEN": {}, "A-ANNO-SYMB": {} };
+    const dxf = buildMockDxf(
+      [
+        polylineEntity(ROOM_VERTS, "Boundary Layer"),
+        textEntity("BEDROOM", 2, 1.5, "A-AREA-IDEN"),
+        textEntity("AZ451", 2, 2, "A-ANNO-SYMB"), // annotation — should be filtered
       ],
-    };
-    const dxf = buildMockDxf([
-      polylineEntity(ROOM_VERTS), // 12 m² LWPOLYLINE — metres
-      polylineJunk, // huge POLYLINE — must be ignored
-      textEntity("OFFICE", 2, 1.5),
-    ]);
+      {},
+      layers,
+    );
     const result = await processDxfFile(dxf);
     expect(result.success).toBe(true);
-    expect(result.unitsDetected).toMatch(/meter/i); // NOT millimeters
-    expect(result.rawRooms[0].area).toBeCloseTo(12, 1);
+    expect(result.rawRooms[0].name).toBe("BEDROOM");
+    // AZ451 should NOT appear in allLabels since its layer is blacklisted
+    expect(result.rawRooms[0].allLabels).not.toContain("AZ451");
   });
 });

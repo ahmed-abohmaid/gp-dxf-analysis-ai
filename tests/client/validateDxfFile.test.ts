@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { validateDxfFile } from "@/lib/utils/validateDxfFile";
+import { validateDxfFile } from "@/features/upload/utils/validateDxfFile";
 import { MAX_UPLOAD_SIZE_BYTES, MAX_UPLOAD_SIZE_MB } from "@/shared/constants";
 
 function makeFile(name: string, size: number, type = "application/octet-stream"): File {

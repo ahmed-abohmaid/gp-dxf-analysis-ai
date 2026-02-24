@@ -41,8 +41,8 @@ body {
 }
 
 ::selection {
-  background: var(--accent-dim);
-  color: var(--accent);
+  background: #bfdbfe;
+  color: #1e3a8a;
 }
 
 ::-webkit-scrollbar {

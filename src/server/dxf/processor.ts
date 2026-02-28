@@ -336,49 +336,64 @@ export async function processDxfFile(content: string): Promise<DxfGeometryResult
     const texts: TextEntity[] = [];
     const polylines: PolylineData[] = [];
 
-    // ── Extract TEXT / MTEXT entities (layer-filtered) ──────────────────────
+    // ── Single-pass entity extraction ────────────────────────────────────────
+    // One iteration over dxf.entities collects all three entity types instead
+    // of three separate passes. LWPOLYLINE and POLYLINE are bucketed separately
+    // so that LWPOLYLINE entries take priority during geometric deduplication.
+    // Bulge factors (curved wall segments) are treated as straight lines —
+    // area accuracy is typically within 2-5% for architectural curves.
+    // @future: convert bulge factors to arc segments for exact area calculation
+    const lwPolylineVerts: Array<Array<{ x: number; y: number }>> = [];
+    const legacyPolylineVerts: Array<Array<{ x: number; y: number }>> = [];
+
     for (const entity of dxf.entities) {
-      if (entity.type !== "TEXT" && entity.type !== "MTEXT") continue;
+      const e = entity as unknown as DxfEntity;
       try {
-        const e = entity as unknown as DxfEntity;
-        if (!isOnAllowedLayer(e, layersUsed.text)) continue;
-        const text = cleanText(e.text ?? "");
-        const pos = e.position ?? e.startPoint;
-        if (text && pos) {
-          texts.push({ text, point: new Flatten.Point(pos.x, pos.y), matched: false });
+        if (e.type === "TEXT" || e.type === "MTEXT") {
+          if (!isOnAllowedLayer(e, layersUsed.text)) continue;
+          const text = cleanText(e.text ?? "");
+          const pos = e.position ?? e.startPoint;
+          if (text && pos) {
+            texts.push({ text, point: new Flatten.Point(pos.x, pos.y), matched: false });
+          }
+        } else if (e.type === "LWPOLYLINE") {
+          if (isOnAllowedLayer(e, layersUsed.boundary)) {
+            lwPolylineVerts.push(e.vertices ?? []);
+          }
+        } else if (e.type === "POLYLINE") {
+          // Skip 3D meshes / polyface meshes — only process 2D polylines
+          if (!e.shape && isOnAllowedLayer(e, layersUsed.boundary)) {
+            legacyPolylineVerts.push(e.vertices ?? []);
+          }
         }
       } catch {
-        // skip malformed text entity
+        // skip malformed entity
       }
     }
 
-    // ── Extract LWPOLYLINE entities (layer-filtered) ────────────────────────
-    for (const entity of dxf.entities) {
-      if (entity.type !== "LWPOLYLINE") continue;
-      try {
-        const e = entity as unknown as DxfEntity;
-        if (!isOnAllowedLayer(e, layersUsed.boundary)) continue;
-        const poly = buildPolygon(e.vertices ?? []);
-        if (poly) polylines.push(poly);
-      } catch {
-        // skip malformed polyline
+    // Build polygons — LWPOLYLINE first so dedup keeps them over legacy POLYLINE
+    for (const verts of [...lwPolylineVerts, ...legacyPolylineVerts]) {
+      // ── Deferred polygon construction ─────────────────────────────────────
+      // Compute a cheap bounding-box area estimate from raw vertices and skip
+      // obvious annotation / block entities before allocating a Flatten.Polygon.
+      if (verts.length >= 3) {
+        let xMin = verts[0].x,
+          xMax = verts[0].x;
+        let yMin = verts[0].y,
+          yMax = verts[0].y;
+        for (const v of verts) {
+          if (v.x < xMin) xMin = v.x;
+          if (v.x > xMax) xMax = v.x;
+          if (v.y < yMin) yMin = v.y;
+          if (v.y > yMax) yMax = v.y;
+        }
+        // Skip if the bbox area is below MIN_ROOM_AREA even when treated as
+        // metres (no unit conversion). MM drawings have much larger raw areas so
+        // this guard only fires on genuine annotation-sized polygons.
+        if ((xMax - xMin) * (yMax - yMin) < MIN_ROOM_AREA) continue;
       }
-    }
-
-    // ── Extract legacy POLYLINE entities (layer-filtered) ───────────────────
-    // Old-style POLYLINE entities use VERTEX sub-entities. The dxf-parser
-    // library converts these into a vertices array on the POLYLINE entity.
-    // Bulge factors (curved wall segments) are treated as straight lines for
-    // now — area accuracy is typically within 2-5% for architectural curves.
-    // @future: convert bulge factors to arc segments for exact area calculation
-    for (const entity of dxf.entities) {
-      if (entity.type !== "POLYLINE") continue;
       try {
-        const e = entity as unknown as DxfEntity;
-        if (!isOnAllowedLayer(e, layersUsed.boundary)) continue;
-        // Skip 3D meshes / polyface meshes — only process 2D polylines
-        if (e.shape) continue;
-        const poly = buildPolygon(e.vertices ?? []);
+        const poly = buildPolygon(verts);
         if (poly) polylines.push(poly);
       } catch {
         // skip malformed polyline
@@ -443,6 +458,17 @@ export async function processDxfFile(content: string): Promise<DxfGeometryResult
         for (let i = 0; i < rawRooms.length; i++) {
           // roomPolylines[i] corresponds to rawRooms[i] — built in parallel in Pass 1
           const polyData = roomPolylines[i];
+          // ── Bounding-box pre-filter ───────────────────────────────────────
+          // Eliminate rooms whose expanded bbox cannot contain this text point
+          // before calling the expensive O(n) polygon.distanceTo().
+          const box = polyData.polygon.box;
+          if (
+            te.point.x < box.xmin - TEXT_MATCH_TOLERANCE ||
+            te.point.x > box.xmax + TEXT_MATCH_TOLERANCE ||
+            te.point.y < box.ymin - TEXT_MATCH_TOLERANCE ||
+            te.point.y > box.ymax + TEXT_MATCH_TOLERANCE
+          )
+            continue;
           try {
             const [dist] = polyData.polygon.distanceTo(te.point);
             if (dist < bestDist) {

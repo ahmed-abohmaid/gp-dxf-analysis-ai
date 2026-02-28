@@ -28,7 +28,9 @@ export function CategoryBreakdownTable({ categoryBreakdown }: CategoryBreakdownT
           <BarChart3 className="h-5 w-5 text-gray-500" />
           <div>
             <CardTitle>Category Breakdown</CardTitle>
-            <CardDescription>Load summary by DPS-01 customer category</CardDescription>
+            <CardDescription>
+              Load summary by DPS-01 customer category — hover category badge for loads included
+            </CardDescription>
           </div>
         </div>
       </CardHeader>
@@ -39,9 +41,9 @@ export function CategoryBreakdownTable({ categoryBreakdown }: CategoryBreakdownT
               <TableHead className="font-semibold">Category</TableHead>
               <TableHead className="font-semibold">Description</TableHead>
               <TableHead className="text-right font-semibold">Rooms</TableHead>
+              <TableHead className="text-right font-semibold">VA/m²</TableHead>
               <TableHead className="text-right font-semibold">Connected (VA)</TableHead>
               <TableHead className="text-right font-semibold">Demand Factor</TableHead>
-              <TableHead className="text-right font-semibold">Coincident Factor</TableHead>
               <TableHead className="text-right font-semibold">Demand Load (VA)</TableHead>
             </TableRow>
           </TableHeader>
@@ -49,13 +51,20 @@ export function CategoryBreakdownTable({ categoryBreakdown }: CategoryBreakdownT
             {categoryBreakdown.map((cat) => (
               <TableRow key={cat.category} className="hover:bg-blue-50/40">
                 <TableCell>
-                  <CategoryBadge category={cat.category} />
+                  <CategoryBadge
+                    category={cat.category}
+                    loadsIncluded={cat.loadsIncluded}
+                    loadDensityVAm2={cat.loadDensityVAm2}
+                    acIncluded={cat.acIncluded}
+                  />
                 </TableCell>
                 <TableCell className="text-sm">{cat.description}</TableCell>
                 <TableCell className="text-right">{cat.roomCount}</TableCell>
+                <TableCell className="text-right tabular-nums">
+                  {cat.loadDensityVAm2 > 0 ? formatNumber(cat.loadDensityVAm2, 0) : "—"}
+                </TableCell>
                 <TableCell className="text-right">{formatNumber(cat.connectedLoad, 0)}</TableCell>
                 <TableCell className="text-right">{cat.demandFactor.toFixed(2)}</TableCell>
-                <TableCell className="text-right">{cat.coincidentFactor.toFixed(2)}</TableCell>
                 <TableCell className="text-right font-semibold">
                   {formatNumber(cat.demandLoad, 0)}
                 </TableCell>

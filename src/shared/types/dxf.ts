@@ -11,17 +11,17 @@ export interface DxfRoom {
   type: string;
   /** DPS-01 customer category assigned by the AI (e.g. "C1") */
   customerCategory: string;
+  /** Human-readable category name from DPS-01 Table 2, returned by AI */
+  categoryDescription: string;
   area: number; // m²
   /**
-   * Combined VA/m² — from DPS-01 Table 8 (AI Phase 2 extracted).
-   * For C1/C2: effective density computed by server-side cross-multiplication.
-   * For C18–C29 declared load: null.
+   * Combined VA/m² for this room — AI-extracted and, for C1/C2, AI-interpolated
+   * from the DPS-01 area→kVA table. Null when AI failed or declared load method.
    */
   loadDensityVAm2: number | null;
   /**
    * What loads the VA/m² figure covers — AI-extracted from code table header/footnotes.
    * Example: "Lights + Air Conditioning + Power Sockets".
-   * Used directly in the UI category hover tooltip.
    */
   loadsIncluded: string | null;
   /**
@@ -46,9 +46,8 @@ export interface DxfRoom {
 export interface CategoryBreakdown {
   /** DPS-01 customer category (e.g. "C1", "C2") */
   category: string;
-  /** Human-readable category description */
+  /** Human-readable category name from DPS-01 Table 2 (AI-provided) */
   description: string;
-  /** Number of rooms in this category */
   roomCount: number;
   /** Sum of connected loads for rooms in this category (VA) */
   connectedLoad: number;
@@ -58,9 +57,9 @@ export interface CategoryBreakdown {
   coincidentFactor: number;
   /** Sum of demand loads for rooms in this category (VA) */
   demandLoad: number;
-  /** Representative VA/m² density for this category (from AI Phase 2) */
+  /** Representative VA/m² density for this category (from AI) */
   loadDensityVAm2: number;
-  /** Loads included description from DPS-01 (AI Phase 2 extracted) */
+  /** Loads included description from DPS-01 (AI-extracted) */
   loadsIncluded: string;
   /** true = VA/m² includes AC; false = lights + sockets only; null = not determined */
   acIncluded: boolean | null;
@@ -74,18 +73,18 @@ export interface DxfProcessResult {
   totalConnectedLoad?: number;
   /** Total demand load in VA (after applying demand × coincident factors) */
   totalDemandLoad?: number;
-  /** Total demand load in kVA */
   totalDemandLoadKVA?: number;
   /** Effective demand factor = totalDemandLoad / totalConnectedLoad */
   effectiveDemandFactor?: number;
   /** Building-level coincident factor (CF = 1.0 for single KWH meter) */
   coincidentFactor?: number;
-  /** Per-category load breakdown */
   categoryBreakdown?: CategoryBreakdown[];
   totalRooms?: number;
   unitsDetected?: string;
   /** true when at least one room failed AI classification */
   hasFailedRooms?: boolean;
+  /** Non-fatal issues encountered during processing (e.g. RAG or AI partial failures) */
+  warnings?: string[];
   timestamp: string;
   error?: string;
 }

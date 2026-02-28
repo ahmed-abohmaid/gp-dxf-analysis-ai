@@ -10,6 +10,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { formatNumber } from "@/lib/utils";
+import { DECLARED_LOAD_CATEGORIES_RE, isC1orC2 } from "@/shared/constants";
 import type { DxfRoom } from "@/shared/types/dxf";
 
 import { CategoryBadge } from "./CategoryBadge";
@@ -138,8 +139,7 @@ function DensityCell({ room }: { room: DxfRoom }) {
   if (!room.customerCategory) return <Dash />;
 
   const category = room.customerCategory;
-  const isC1orC2 = category === "C1" || category === "C2";
-  const isDeclared = /^C(1[89]|2\d)$/.test(category);
+  const isDeclared = DECLARED_LOAD_CATEGORIES_RE.test(category);
 
   if (isDeclared) {
     return (
@@ -154,7 +154,7 @@ function DensityCell({ room }: { room: DxfRoom }) {
   return (
     <span className="tabular-nums">
       {formatNumber(room.loadDensityVAm2, 0)}
-      {isC1orC2 && (
+      {isC1orC2(category) && (
         <span
           className="ml-0.5 text-[10px] text-gray-400"
           title="Effective density from DPS-01 Table 4/6 interpolation"

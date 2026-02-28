@@ -12,9 +12,10 @@ import { FileDropZone } from "./components/FileDropZone";
 interface FileUploadProps {
   onFileSelect: (file: File, electricalCode: string, includeAC: boolean) => void;
   isProcessing: boolean;
+  progressStep?: string | null;
 }
 
-export function FileUpload({ onFileSelect, isProcessing }: FileUploadProps) {
+export function FileUpload({ onFileSelect, isProcessing, progressStep }: FileUploadProps) {
   const [electricalCode, setElectricalCode] = useState("DPS-01");
   const [includeAC, setIncludeAC] = useState(true);
 
@@ -23,6 +24,7 @@ export function FileUpload({ onFileSelect, isProcessing }: FileUploadProps) {
       <CardContent className="pt-6">
         <FileDropZone
           isProcessing={isProcessing}
+          progressStep={progressStep}
           onProcess={(file) => onFileSelect(file, electricalCode, includeAC)}
         />
         <ElectricalCodeSelect value={electricalCode} onChange={setElectricalCode} />

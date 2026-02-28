@@ -66,15 +66,24 @@ FOR EACH STAGE OF REVIEW: output the explanation and pros and cons of each stage
 
 Next.js 16 App Router app that processes AutoCAD DXF files into electrical load estimates per **Saudi Building Code (SBC 401)**.
 
-**Two-phase server pipeline** (`src/server/services/dxf-load.post.ts`):
+**Four-step server pipeline** (`src/server/pipeline/orchestrator.ts`), streamed to the client via **Server-Sent Events (SSE)**:
 
-1. **Geometry** — `processDxfFile()` parses DXF, extracts closed polylines as rooms with areas
-2. **AI + RAG** — `classifyRooms()` calls Gemini Flash; SBC 401 context is retrieved from a **Supabase pgvector** store
+1. **Geometry** — `processDxfFile()` parses DXF, extracts closed polylines as rooms with areas; `aggregateRooms()` resolves ditto marks and deduplicates by normalised label
+2. **RAG** — `buildRagQueries()` fires 4 parallel Supabase pgvector searches and returns a `[string,string,string,string]` tuple of context strings
+3. **AI** — `analyzeRooms()` calls Gemini Flash in a single pass: classifies each unique room to a DPS-01 category, extracts load density + demand factor, and performs C1/C2 area-based interpolation inside the prompt
+4. **Loads** — `assembleLoads()` merges AI results with geometry; `computeRoomDemandLoad()` applies `connectedLoad × demandFactor × coincidentFactor`
+
+Progress is streamed via `event: progress` SSE events (one per step) followed by a final `event: result` event. The client-side `postProcessDxf()` parses the stream line-by-line and calls an `onProgress` callback.
 
 **Module boundaries** (enforce strictly):
 
 - `src/server/` — server-only; never import in client components
-- `src/shared/` — wire types and constants shared across the boundary (`DxfRoom`, `DxfProcessResult`, `MAX_UPLOAD_SIZE_BYTES`)
+  - `src/server/pipeline/` — HTTP handler (`orchestrator.ts`), validation (`dxf-validator.ts`), room aggregation (`room-aggregator.ts`), load assembly (`load-assembler.ts`), key normalisation (`normalize.ts`)
+  - `src/server/ai/` — single-pass analyzer (`room-analyzer.ts`), Gemini client (`gemini-client.ts`), and `prompts/` sub-folder (`schemas.ts`, `room-analysis.ts`)
+  - `src/server/dxf/` — DXF parsing (`parser.ts`), polygon building (`polygon-builder.ts`), unit detection (`unit-detector.ts`), room matching (`room-matcher.ts`), orchestrator (`processor.ts`)
+  - `src/server/calculation/` — demand-load computation (`factors-calculator.ts`)
+  - `src/server/rag/` — vector store singleton (`vector-store.ts`), query builder (`query-builder.ts`), Saudi code loader (`saudi-code-loader.ts`)
+- `src/shared/` — wire types and constants shared across the boundary (`DxfRoom`, `DxfProcessResult`, `MAX_UPLOAD_SIZE_BYTES`, `DECLARED_LOAD_CATEGORIES_RE`, `isC1orC2`)
 - `src/features/<name>/` — React feature components; each feature owns its feature-specific hooks and utils:
   - `src/features/<name>/hooks/` — hooks used only by this feature (e.g. `features/upload/hooks/useProcessDxf.ts`)
   - `src/features/<name>/utils/` — utils used only by this feature (e.g. `features/upload/utils/validateDxfFile.ts`)
@@ -109,9 +118,9 @@ npm run format              # Prettier
 ## Comments
 
 - **No trivial comments** — never annotate what the code already clearly says (e.g. `// increment counter`, `// return result`). If a comment only restates the code, delete it.
-- **JSDoc for complex logic only** — add `/** … */` JSDoc only when the behaviour, side-effects, or a specific parameter cannot be inferred from the name and signature alone. A component or function whose name already describes what it does (e.g. `CategoryBadge`, `FactorCell`, `WithTooltip`) must not have a JSDoc comment. JSDoc _does_ earn its place when: (1) a function has a non-obvious conditional path (e.g. `LoadCell` — only renders a tooltip when all three density props are present), (2) a prop has a non-additive behavioural override (e.g. `error` on `CodeRefCell` _replaces_ the reference render entirely), or (3) a public API has meaningful constraints not expressed in TypeScript (e.g. `processDxfFile`, `classifyRooms`, `searchSaudiCode`). When in doubt, omit.
+- **JSDoc for complex logic only** — add `/** … */` JSDoc only when the behaviour, side-effects, or a specific parameter cannot be inferred from the name and signature alone. A component or function whose name already describes what it does (e.g. `CategoryBadge`, `FactorCell`, `WithTooltip`) must not have a JSDoc comment. JSDoc _does_ earn its place when: (1) a function has a non-obvious conditional path (e.g. `LoadCell` — only renders a tooltip when all three density props are present), (2) a prop has a non-additive behavioural override (e.g. `error` on `CodeRefCell` _replaces_ the reference render entirely), or (3) a public API has meaningful constraints not expressed in TypeScript (e.g. `processDxfFile`, `analyzeRooms`, `searchSaudiCode`). When in doubt, omit.
 - **Inline comments for non-obvious logic** — use `//` comments only to explain _why_ something is done when the reason cannot be inferred from the code: algorithmic choices, SBC 401 rule references, edge-case guards, unit-conversion constants (e.g. `MM_THRESHOLD`, `MM_FACTOR`), and intentional workarounds.
-- **Section dividers** — the `// ── Label ──` style dividers used in `processor.ts` and `dxf-load.post.ts` are acceptable to break up long files into logical regions; keep them consistent with the existing style.
+- **Section dividers** — the `// ── Label ──` style dividers used in `processor.ts` and `orchestrator.ts` are acceptable to break up long files into logical regions; keep them consistent with the existing style.
 - **`@future` tag** — use `// @future: …` (as seen in `vector-store.ts` and `useCustomQuery.ts`) to flag intentionally unused exports or hooks that are scaffolded for upcoming features. Do not remove them silently.
 
 ## Project Conventions
@@ -119,8 +128,10 @@ npm run format              # Prettier
 - **Hooks wrap TanStack Query**: use `useCustomMutation` / `useCustomQuery` (auto-toast on error/success) — never call `useMutation`/`useQuery` directly. See `src/hooks/useCustomMutation.ts`.
 - **Toasts via sileo**: call `pushErrorToast` / `pushSuccessToast` from `src/lib/utils/pushToasters.ts` — never import `sileo` directly.
 - **Error normalisation**: always use `normalizeError()` (`src/lib/utils/normalizeError.ts`) before displaying errors.
-- **Shared constants**: file size limits live in `src/shared/constants.ts` and are consumed by both the API route and `FileUpload` component.
+- **Shared constants**: file size limits, `DECLARED_LOAD_CATEGORIES_RE`, and `isC1orC2` live in `src/shared/constants.ts` and are consumed by both server and client.
 - **Rooms with failed AI classification** are included in the response with `null` load fields and an `error` string; `hasFailedRooms` flags this on the response.
+- **No `CATEGORY_DESCRIPTIONS` map** — the AI provides `categoryDescription` directly on each room; it is stored on `DxfRoom.categoryDescription`.
+- **`coincidentFactor = 1.0`** is defined in `load-assembler.ts`; marked `// @future:` for when multi-meter buildings are supported.
 - `round2()` from `src/lib/utils.ts` is used for all VA load values.
 
 ## Testing
@@ -130,12 +141,12 @@ Tests mirror `src/` under `tests/` with separate vitest environments:
 - `tests/client/**` → `jsdom`
 - `tests/server/**` → `node`
 
-Integration tests in `tests/server/integration/` mock `processDxfFile`, `classifyRooms`, `searchSaudiCode` via `vi.mock()`. Unit tests in `tests/server/unit/` mock `dxf-parser` to feed controlled JSON.
+Unit tests in `tests/server/unit/` cover: `dxf-processor` (mocked `dxf-parser`), `factors-calculator`, `normalize`, `dxf-validator`, `room-aggregator`, `load-assembler`.
 
 ## Integration Points
 
-- **Gemini Flash** (`gemini-2.5-flash`) via `@ai-sdk/google` — structured output using `Output.object` + Zod schema (`ClassificationSchema`).
-- **Supabase pgvector** via `@langchain/community/vectorstores/supabase` — singleton in `src/server/rag/vector-store.ts`; initialised at startup in `instrumentation.ts`. Similarity threshold of 0.5 applied in `searchSaudiCode()` to filter irrelevant chunks.
+- **Gemini Flash** (`gemini-2.5-flash`) via `@ai-sdk/google` — single-pass structured output using `Output.object` + Zod schema (`RoomAnalysisSchema`). One `generateObject()` call returns classification + load density + demand factor + C1/C2 interpolation for all rooms simultaneously.
+- **Supabase pgvector** via `@langchain/community/vectorstores/supabase` — singleton in `src/server/rag/vector-store.ts`; initialised at startup in `instrumentation.ts`. `buildRagQueries()` returns a 4-tuple of query strings run in parallel via `Promise.all`. Similarity threshold of 0.5 applied in `searchSaudiCode()` to filter irrelevant chunks.
 - **dxf-parser**, **@flatten-js/core**, **@langchain/community**, **@langchain/google-genai** are `serverExternalPackages` in `next.config.ts` (Node native modules).
 
 ## Security

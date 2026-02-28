@@ -1,9 +1,4 @@
-import { generateText, Output } from "ai";
-import { z } from "zod";
-
-import { geminiFlash } from "@/server/ai/gemini-client";
-
-export interface RoomInput {
+export interface RoomPromptInput {
   name: string;
   area: number;
   totalAreaForType: number;
@@ -11,53 +6,33 @@ export interface RoomInput {
   allLabels?: string[];
 }
 
-const ClassificationSchema = z.object({
-  classifications: z.array(
-    z.object({
-      roomLabel: z.string().describe("Exact room label as given in the input — copy verbatim"),
-      roomType: z
-        .string()
-        .describe("Normalised English room type, e.g. 'Master Bedroom', 'Corridor'"),
-      customerCategory: z.string().describe("DPS-01 customer category code: one of C1 … C29"),
-      codeReference: z
-        .string()
-        .describe("DPS-01 section used, e.g. 'DPS-01 Table 2 — Customer Classification'"),
-      classificationReason: z
-        .string()
-        .describe("One sentence: why this room maps to the chosen category"),
-    }),
-  ),
-});
-
-export type Classification = z.infer<typeof ClassificationSchema>["classifications"][number];
-
-function buildClassificationPrompt(rooms: RoomInput[], codeContext: string): string {
+export function buildRoomAnalysisPrompt(
+  rooms: RoomPromptInput[],
+  codeContext: string,
+  includeAC: boolean,
+): string {
   const roomsBlock = rooms
     .map((r, i) => {
-      const allLabelsStr =
+      const labelsStr =
         r.allLabels && r.allLabels.length > 1
           ? ` (all text inside boundary: ${r.allLabels.map((l) => `"${l}"`).join(", ")})`
           : "";
       const countStr =
         r.roomCount > 1
-          ? ` ×${r.roomCount} rooms — total area: ${r.totalAreaForType.toFixed(2)} m²`
+          ? ` ×${r.roomCount} rooms — total area for type: ${r.totalAreaForType.toFixed(2)} m²`
           : "";
-      return `${i + 1}. "${r.name}"${allLabelsStr}${countStr} — this instance: ${r.area.toFixed(2)} m²`;
+      return `${i + 1}. "${r.name}"${labelsStr}${countStr} — this instance: ${r.area.toFixed(2)} m² | TOTAL AREA FOR TYPE: ${r.totalAreaForType.toFixed(2)} m²`;
     })
     .join("\n");
 
   return `You are an expert in the Saudi Electricity Company Load Estimation Standard DPS-01.
 
-Your ONLY task is to classify each room in a building floor plan to the correct
-DPS-01 customer category (C1–C29).
+Your task is to BOTH classify each room AND extract its load estimation values in a single pass.
 
-DO NOT output any numbers.
-DO NOT output load densities, demand factors, or any calculated values.
-Those are extracted from the code separately after you return category codes.
+AC_PREFERENCE = ${includeAC ? "true (include AC loads — use Table 8 three-phase L-L 400V)" : "false (no AC — use lights + sockets only version if available)"}
 
 ══════════════════════════════════════════════════════════════
-DPS-01 TABLE 2 — CUSTOMER CATEGORY DEFINITIONS
-(Use as your primary reference. Retrieved text below may add detail.)
+PART 1 — CLASSIFICATION: DPS-01 TABLE 2 CATEGORY DEFINITIONS
 ══════════════════════════════════════════════════════════════
 
 C1  — Normal Residential Dwelling
@@ -172,42 +147,66 @@ Arabic quick-reference:
   قاعة               → Hall / Meeting Room
 
 RULE 3 — MIXED-USE BUILDINGS
-If the drawing clearly shows multiple uses (e.g. ground floor shops + upper floor apartments),
-classify each zone to its own category. Multiple codes may appear in the output.
+If the drawing shows multiple uses (e.g. ground floor shops + upper floor apartments),
+classify each zone to its own category.
 
 RULE 4 — C18–C29 FLAG
 For any C18–C29 room, append to codeReference:
   "Declared Load Method required — area-based density not applicable (DPS-01 Section 20)"
 
 ══════════════════════════════════════════════════════════════
-DPS-01 CLASSIFICATION TEXT (retrieved):
-${codeContext.trim() || "NO SECTIONS RETRIEVED — rely on Table 2 definitions above."}
+PART 2 — LOAD VALUES: EXTRACT FROM DPS-01 FOR EACH CATEGORY
+══════════════════════════════════════════════════════════════
+
+For each room, after determining its category, extract these values:
+
+1. LOAD DENSITY (VA/m²) — loadDensityVAm2
+   ${includeAC ? "Use Table 8 (three-phase L-L 400V) — includes Lights + AC + Power Sockets." : "Look for a version excluding AC (Not table 8). If no AC-free value exists use the standard value and note it in loadsIncluded."}
+
+   SPECIAL — C1 (Residential) and C2 (Commercial Shops):
+   These use an area→kVA table method (Tables 3–6), NOT a flat VA/m² figure.
+   • C1: use Table 4 (three-phase L-L 400V)
+   • C2: use Table 6 (three-phase L-L 400V)
+   The TOTAL AREA FOR TYPE is given for each room in the input.
+   Steps:
+     a. Locate the two table rows that bracket the given total area.
+     b. Linearly interpolate to get the kVA for that area.
+        If area exceeds the table maximum, use the extended formula (VA/m²) from the
+        footnote or Section 16 and multiply by the total area to get kVA.
+     c. Convert: loadDensityVAm2 = (interpolated_kVA × 1000) / totalAreaForType
+   Return the final VA/m² result directly — do NOT return the kVA table.
+
+   SPECIAL — C11 (Common Areas):
+   C11 density may appear separately from the main Table 8 grid.
+   Search for: "common area", "shared services", "corridor", "emergency lighting",
+   "public area", "building services" load density mentions.
+   C11 density is typically much lower than habitable areas.
+   If truly not found: return loadDensityVAm2 = 0 and note in codeReference.
+
+   SPECIAL — C18–C29 (Declared Load): return loadDensityVAm2 = 0.
+
+2. DEMAND FACTOR — demandFactor
+   Single flat value from DPS-01 Table 11. One value per category row.
+   Convert percentages: 60% → 0.60. If not found: return 1.0.
+
+3. LOADS INCLUDED — loadsIncluded
+   Copy the exact description from the table header or footnote.
+   Example: "Lights + Air Conditioning + Power Sockets"
+
+══════════════════════════════════════════════════════════════
+DPS-01 CODE SECTIONS (retrieved):
+${codeContext.trim() || "NO SECTIONS RETRIEVED — rely on Table 2 definitions. Set all load values to 0 and note 'Not found in retrieved sections'."}
 ══════════════════════════════════════════════════════════════
 
 ROOMS FROM DXF DRAWING:
 ${roomsBlock}
 
 ══════════════════════════════════════════════════════════════
-Return exactly ${rooms.length} entries — one per room label above.`;
-}
-
-/**
- * Phase 1: classifies rooms to DPS-01 category codes only.
- * No numerical values are produced — densities and factors come from Phase 2.
- *
- * @throws Error on AI failure (caller decides how to handle)
- */
-export async function classifyRooms(rooms: RoomInput[], codeContext: string) {
-  const { output } = await generateText({
-    model: geminiFlash,
-    output: Output.object({ schema: ClassificationSchema }),
-    prompt: buildClassificationPrompt(rooms, codeContext),
-  });
-
-  if (!output?.classifications) {
-    console.error("[classifyRooms] Gemini returned null or malformed output");
-    return [];
-  }
-
-  return output.classifications;
+STRICT RULES:
+• Extract values ONLY from the retrieved sections above.
+• Do NOT guess or use knowledge not in the retrieved text.
+• If a value is not in the retrieved text: set numeric field to 0 and write
+  "Not found in retrieved sections" in codeReference.
+• All demand factors must be in range 0–1 (convert from % if needed).
+• Return exactly ${rooms.length} entries — one per room label above.`;
 }

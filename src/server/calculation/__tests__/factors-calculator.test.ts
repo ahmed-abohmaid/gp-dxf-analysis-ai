@@ -4,13 +4,17 @@ import {
   computeBuildingSummary,
   computeRoomDemandLoad,
   type RoomLoadInput,
-} from "@/server/services/factors-calculator";
+} from "@/server/calculation/factors-calculator";
 
 // Fields added in Phase 2; irrelevant to the demand-load math being tested here
-const X: Pick<RoomLoadInput, "loadDensityVAm2" | "loadsIncluded" | "acIncluded"> = {
+const X: Pick<
+  RoomLoadInput,
+  "loadDensityVAm2" | "loadsIncluded" | "acIncluded" | "categoryDescription"
+> = {
   loadDensityVAm2: 100,
   loadsIncluded: "Lights + Power Sockets",
   acIncluded: null,
+  categoryDescription: "Normal Residential Dwelling",
 };
 
 // ── computeRoomDemandLoad ──────────────────────────────────────────────────────
@@ -25,10 +29,7 @@ describe("computeRoomDemandLoad", () => {
       customerCategory: "C1",
       roomType: "Bedroom",
     });
-    expect(result.demandLoad).toBe(230.4);
-    expect(result.connectedLoad).toBe(384);
-    expect(result.demandFactor).toBe(0.6);
-    expect(result.coincidentFactor).toBe(1.0);
+    expect(result).toBe(230.4);
   });
 
   it("applies both demand and coincident factors", () => {
@@ -41,7 +42,7 @@ describe("computeRoomDemandLoad", () => {
       roomType: "Living Room",
     });
     // 1000 × 0.8 × 0.75 = 600
-    expect(result.demandLoad).toBe(600);
+    expect(result).toBe(600);
   });
 
   it("returns connectedLoad unchanged when both factors are 1.0", () => {
@@ -53,7 +54,7 @@ describe("computeRoomDemandLoad", () => {
       customerCategory: "C2",
       roomType: "Shop",
     });
-    expect(result.demandLoad).toBe(500);
+    expect(result).toBe(500);
   });
 
   it("returns 0 demand load when connected load is 0", () => {
@@ -65,7 +66,7 @@ describe("computeRoomDemandLoad", () => {
       customerCategory: "C1",
       roomType: "Bathroom",
     });
-    expect(result.demandLoad).toBe(0);
+    expect(result).toBe(0);
   });
 
   it("rounds to 2 decimal places", () => {
@@ -78,7 +79,7 @@ describe("computeRoomDemandLoad", () => {
       roomType: "Bedroom",
     });
     // 100 × 0.3 × 0.7 = 21.0 (exact)
-    expect(result.demandLoad).toBe(21);
+    expect(result).toBe(21);
   });
 });
 
@@ -112,6 +113,7 @@ describe("computeBuildingSummary", () => {
     expect(summary.effectiveDemandFactor).toBe(0.6);
     expect(summary.categoryBreakdown).toHaveLength(1);
     expect(summary.categoryBreakdown[0].category).toBe("C1");
+    expect(summary.categoryBreakdown[0].description).toBe("Normal Residential Dwelling");
     expect(summary.categoryBreakdown[0].roomCount).toBe(1);
     expect(summary.categoryBreakdown[0].connectedLoad).toBe(384);
     expect(summary.categoryBreakdown[0].demandLoad).toBe(230.4);

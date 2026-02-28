@@ -4,7 +4,7 @@ import react from "@vitejs/plugin-react";
 import { defineConfig } from "vitest/config";
 
 const alias = { "@": path.resolve(__dirname, "./src") };
-const setupFiles = ["./tests/setup.ts"];
+const setupFiles = ["./testsSetup.ts"];
 
 export default defineConfig({
   plugins: [react()],
@@ -16,7 +16,7 @@ export default defineConfig({
         test: {
           name: "client",
           environment: "jsdom",
-          include: ["tests/client/**/*.test.{ts,tsx}"],
+          include: ["src/{lib,hooks,features,components}/**/__tests__/**/*.test.{ts,tsx}"],
         },
         resolve: { alias },
       },
@@ -24,7 +24,7 @@ export default defineConfig({
         test: {
           name: "server",
           environment: "node",
-          include: ["tests/server/**/*.test.ts"],
+          include: ["src/server/**/__tests__/**/*.test.ts"],
         },
         resolve: { alias },
       },

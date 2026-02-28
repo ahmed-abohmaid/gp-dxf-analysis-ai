@@ -1,37 +1,19 @@
-/**
- * server/rag/query-builder.ts
- *
- * Builds the targeted RAG query strings used to retrieve DPS-01 context from
- * the Supabase pgvector store.
- *
- * A single monolithic query covering load densities, demand factors, coincident
- * factors, and room names produces a "smeared" embedding that scores poorly
- * against any specific section in the pdf. Splitting into focused queries —
- * one per topic — maximises the chance that each relevant chunk meets the
- * similarity threshold.
- */
+export function buildRagQueries(): {
+  classificationQueries: [string, string];
+  valueQueries: [string, string, string, string, string];
+} {
+  return {
+    classificationQueries: [
+      "DPS-01 customer category classification facility type C1 C2 C3 residential commercial dwelling shop office hospital school mosque common area building services Table 2",
+      "DPS-01 mixed use building common area corridor staircase lobby C11 classification multiple categories special facilities",
+    ],
 
-/**
- * Return the set of focused DPS-01 retrieval queries for a given list of room names.
- * All three queries are run in parallel via Promise.all and their results are merged.
- *
- * @param roomNames - Unique room labels from the DXF drawing (deduplicated by caller)
- * @returns Array of query strings; one per retrieval focus area
- */
-export function buildRagQueries(roomNames: string[]): [string, string, string] {
-  const roomsFragment = roomNames.join(", ");
-
-  // Query 1 — load densities: retrieves VA/m² figures from Section 10-11 and Tables 7-8
-  const densityQuery = `DPS-01 connected loads estimation load density VA per square meter residential C1 commercial C2 habitable wet circulation Table 7 Table 8 facility type room type: ${roomsFragment}`;
-
-  // Query 2 — demand factors: retrieves demand factor tables (Table 2 / Table 3) by
-  // connected-load tier so the AI can look up the correct factor for each room
-  const demandFactorQuery =
-    "DPS-01 demand factor Table 2 Table 3 connected load tier residential C1 commercial C2 after diversity maximum demand ADMD kVA";
-
-  // Query 3 — coincident/diversity factors: retrieves Table 4 and diversity sections
-  const coincidentFactorQuery =
-    "DPS-01 coincident factor diversity factor Table 4 simultaneous demand residential commercial DPS-01";
-
-  return [densityQuery, demandFactorQuery, coincidentFactorQuery];
+    valueQueries: [
+      "DPS-01 load density VA per square meter combined loads lighting air conditioning power sockets Table 7 Table 8 customer category",
+      "DPS-01 demand factor Table 11 customer category C1 C2 C3 maximum demand after diversity percentage",
+      "DPS-01 residential dwelling C1 area square meter kVA load estimation Table 3 Table 4 230V 400V single phase three phase",
+      "DPS-01 commercial shop C2 area square meter kVA load estimation Table 5 Table 6 400V three phase",
+      "DPS-01 common area building services C11 load density corridor lobby staircase emergency lighting VA per square meter shared area",
+    ],
+  };
 }

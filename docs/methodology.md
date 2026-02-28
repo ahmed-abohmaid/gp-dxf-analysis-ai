@@ -2,11 +2,12 @@
 
 ## Overview
 
-A **Next.js 15 App Router** web application that accepts AutoCAD DXF floor-plan files and produces
+A **Next.js 16 App Router** web application that accepts AutoCAD DXF floor-plan files and produces
 per-room electrical load estimates compliant with **DPS-01** (Saudi Electricity Company Load
 Estimation Standard, a.k.a. SBC 401). The system combines deterministic geometry processing with a
-**two-phase AI pipeline** — Phase 1 classifies rooms to DPS-01 category codes (C1–C29), Phase 2
-extracts load densities and demand factors from the code PDF via RAG.
+**single-pass AI pipeline** — `analyzeRooms()` classifies rooms to DPS-01 category codes (C1–C29)
+and extracts load densities, demand factors, and C1/C2 interpolation in one `generateObject()` call.
+Progress is streamed to the browser via **Server-Sent Events (SSE)**.
 
 ---
 
@@ -16,47 +17,49 @@ extracts load densities and demand factors from the code PDF via RAG.
 Browser (React 19)
     │  multipart/form-data (DXF file + electricalCode)
     ▼
-POST /api/dxf  (Next.js Route Handler)
+POST /api/dxf  (Next.js Route Handler — text/event-stream SSE)
     │
-    ├─ Step 1 — Geometry  →  processDxfFile()
+    ├─ Step 1 — Geometry  →  processDxfFile() + aggregateRooms()
     │       dxf-parser  →  @flatten-js/core
     │       Extracts closed polylines → room polygons + areas (m²)
-    │       Resolves ditto marks (" or ") to nearest preceding label
-    │       Aggregates duplicate room names into unique type inputs
+    │       aggregateRooms():
+    │         Pass 1 — resolve ditto marks to nearest preceding label
+    │         Pass 2 — deduplicate by normalised key → uniqueRoomInputs + roomAggregates
+    │       ── SSE: event: progress ("Parsing DXF geometry") ──
     │
-    ├─ Step 2 — Parallel RAG  →  buildRagQueries() → 6 queries
-    │       classificationQueries[2]  → searchSaudiCode(q, topK=5)
-    │       valueQueries[4]           → searchSaudiCode(q, topK=6)
-    │       Deduplicates chunks → classificationContext + valueContext
+    ├─ Step 2 — Parallel RAG  →  buildRagQueries() → 4 queries
+    │       Returns [string, string, string, string] tuple
+    │       Promise.all → searchSaudiCode() × 4, similarity threshold 0.5
+    │       ── SSE: event: progress ("Retrieving Saudi code context") ──
     │
-    ├─ Step 3 — Phase 1 AI: Classification only
-    │       classifyRooms(uniqueRooms, classificationContext)
-    │       generateText()  →  Gemini Flash (gemini-2.5-flash)
-    │       Returns: { roomLabel, roomType, customerCategory,
-    │                  codeReference, classificationReason } per room
-    │       NO numbers — categories only
+    ├─ Step 3 — Single-pass AI  →  analyzeRooms()
+    │       generateObject()  →  Gemini Flash (gemini-2.5-flash)
+    │       RoomAnalysisSchema — per unique room:
+    │         { roomLabel, roomType, customerCategory, categoryDescription,
+    │           loadDensityVAm2, demandFactor, loadsIncluded, acIncluded,
+    │           codeReference, classificationReason }
+    │       C1/C2 interpolation: AI receives totalAreaForType and interpolates
+    │       from Tables 3–6 inside the prompt → returns final VA/m² directly
+    │       ── SSE: event: progress ("Analyzing rooms with AI") ──
     │
-    ├─ Step 4 — Phase 2 AI: Value extraction per unique category
-    │       extractCategoryValues(uniqueCategories, valueContext)
-    │       generateText()  →  Gemini Flash
-    │       Returns: { customerCategory, loadDensityVAm2, loadsIncluded,
-    │                  demandFactor, c1c2KvaTable?, c1c2ExtendedDensityVAm2? }
-    │
-    ├─ Step 5 — C1/C2 interpolation (if kVA table returned)
-    │       interpolateLoadTable(kvaTable, totalCategoryAreaM2)
-    │       → effective VA/m² via linear interpolation
-    │
-    └─ Step 6 — Load computation per room
-            connectedLoad = loadDensityVAm2 × area
-            demandLoad    = connectedLoad × demandFactor × coincidentFactor
-            coincidentFactor = 1.0 (N=1 KWH meter; multi-meter CF coming soon)
+    └─ Step 4 — Load assembly  →  assembleLoads() + computeRoomDemandLoad()
+            connectedLoad = round2(loadDensityVAm2 × area)
+            demandLoad    = round2(connectedLoad × demandFactor × coincidentFactor)
+            coincidentFactor = 1.0  // @future: multi-meter buildings
+            computeBuildingSummary() → totals + categoryBreakdown[]
+            ── SSE: event: progress ("Computing final loads") ──
+            ── SSE: event: result (full DxfProcessResult JSON) ──
 ```
 
 ### Module Boundaries
 
 | Layer                  | Path                              | Rule                                               |
 | ---------------------- | --------------------------------- | -------------------------------------------------- |
-| Server-only            | `src/server/`                     | Never imported by client components                |
+| Server pipeline        | `src/server/pipeline/`            | HTTP handler, validation, aggregation, assembly    |
+| Server AI              | `src/server/ai/`                  | Single-pass analyzer, Gemini client, prompts/      |
+| Server DXF             | `src/server/dxf/`                 | Parser, polygon builder, unit detector, matcher    |
+| Server calculations    | `src/server/calculation/`         | Demand-load computation                            |
+| Server RAG             | `src/server/rag/`                 | Vector store, query builder, Saudi code loader     |
 | Shared wire types      | `src/shared/`                     | Used by both client and server                     |
 | React feature root     | `src/features/<name>/`            | Client components only                             |
 | Feature sub-components | `src/features/<name>/components/` | Components owned exclusively by that feature       |
@@ -71,25 +74,25 @@ POST /api/dxf  (Next.js Route Handler)
 
 ### Runtime Dependencies
 
-| Package                                                | Usage                                                                                                                  |
-| ------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------- |
-| `next@16`                                              | App Router framework; API route handler at `src/app/api/dxf/route.ts`                                                  |
-| `react@19` / `react-dom@19`                            | UI runtime                                                                                                             |
-| `@ai-sdk/google` + `ai`                                | `generateText()` with `Output.object()` for structured Gemini output                                                   |
-| `@langchain/community`                                 | `SupabaseVectorStore` — queries the Supabase pgvector store; `PDFLoader` — loads SBC 401 PDF during `prebuild`         |
-| `@langchain/google-genai`                              | `GoogleGenerativeAIEmbeddings` (`gemini-embedding-001`) — used at index build time and similarity search               |
-| `@supabase/supabase-js`                                | Supabase client — connects to the pgvector store for document storage and retrieval                                    |
-| `@langchain/textsplitters`                             | `RecursiveCharacterTextSplitter` — chunks SBC 401 text into 1 000-char overlapping segments during `prebuild`          |
-| `@langchain/core`                                      | LangChain document types shared across LangChain integrations                                                          |
-| `dxf-parser`                                           | Parses raw DXF text into a structured entity tree                                                                      |
-| `@flatten-js/core`                                     | Polygon area computation and point-in-polygon test for room label matching                                             |
-| `@tanstack/react-query@5`                              | Server-state management; wrapped by `useCustomMutation` / `useCustomQuery`                                             |
-| `zod@4`                                                | `ClassificationSchema` (Phase 1) + `CategoryValuesSchema` (Phase 2) for Gemini structured output; API input validation |
-| `sileo`                                                | Toast notification system (consumed via `pushErrorToast` / `pushSuccessToast`)                                         |
-| `lucide-react`                                         | Icon set used throughout the UI                                                                                        |
-| `radix-ui` + shadcn components                         | Accessible UI primitives (Card, Button, Badge, Table, etc.)                                                            |
-| `class-variance-authority` + `clsx` + `tailwind-merge` | Conditional class name utilities                                                                                       |
-| `tw-animate-css`                                       | Tailwind CSS animation utilities                                                                                       |
+| Package                                                | Usage                                                                                                          |
+| ------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------- |
+| `next@16`                                              | App Router framework; API route handler at `src/app/api/dxf/route.ts`                                          |
+| `react@19` / `react-dom@19`                            | UI runtime                                                                                                     |
+| `@ai-sdk/google` + `ai`                                | `generateObject()` with `Output.object()` for single-pass structured Gemini output                             |
+| `@langchain/community`                                 | `SupabaseVectorStore` — queries the Supabase pgvector store; `PDFLoader` — loads SBC 401 PDF during `prebuild` |
+| `@langchain/google-genai`                              | `GoogleGenerativeAIEmbeddings` (`gemini-embedding-001`) — used at index build time and similarity search       |
+| `@supabase/supabase-js`                                | Supabase client — connects to the pgvector store for document storage and retrieval                            |
+| `@langchain/textsplitters`                             | `RecursiveCharacterTextSplitter` — chunks SBC 401 text into 1 000-char overlapping segments during `prebuild`  |
+| `@langchain/core`                                      | LangChain document types shared across LangChain integrations                                                  |
+| `dxf-parser`                                           | Parses raw DXF text into a structured entity tree                                                              |
+| `@flatten-js/core`                                     | Polygon area computation and point-in-polygon test for room label matching                                     |
+| `@tanstack/react-query@5`                              | Server-state management; wrapped by `useCustomMutation` / `useCustomQuery`                                     |
+| `zod@4`                                                | `RoomAnalysisSchema` — unified single-pass Gemini output schema; `MAX_UPLOAD_SIZE_BYTES` validation            |
+| `sileo`                                                | Toast notification system (consumed via `pushErrorToast` / `pushSuccessToast`)                                 |
+| `lucide-react`                                         | Icon set used throughout the UI                                                                                |
+| `radix-ui` + shadcn components                         | Accessible UI primitives (Card, Button, Badge, Table, etc.)                                                    |
+| `class-variance-authority` + `clsx` + `tailwind-merge` | Conditional class name utilities                                                                               |
+| `tw-animate-css`                                       | Tailwind CSS animation utilities                                                                               |
 
 ### Development Dependencies
 
@@ -128,62 +131,65 @@ A user uploads a valid DXF floor plan with recognisable room polylines and text 
         │  POST multipart/form-data to /api/dxf
         ▼
 
-[Server — POST /api/dxf]
-  ── Phase 1: Geometry ───────────────────────────────
+[Server — POST /api/dxf — SSE text/event-stream]
+  ── Step 1: Geometry ────────────────────────────────
+  validateDxfRequest(req) — electricalCode, extension, size ≤ 10 MB, non-empty
   processDxfFile(content)
     │
-    ├─ dxf-parser.parseSync()  →  entity tree
-    ├─ Filter closed LWPOLYLINE / POLYLINE entities
-    ├─ Build Flatten.Polygon for each polyline
-    ├─ Compute sample areas → detect mm vs m units
-    │       If avg area > 500 000 → divide by 1 000 000 (mm² → m²)
-    ├─ Discard polygons < 0.2 m² (annotations/blocks)
-    ├─ Collect TEXT / MTEXT entities
-    ├─ Point-in-polygon test → assign text label to each room polygon
-    └─ Return DxfGeometryResult { rawRooms: RawRoom[], unitsDetected, ... }
+    ├─ parseDxfContent()  →  entity tree (dxf-parser)
+    ├─ buildRoomPolygons()  →  Flatten.Polygon per closed LWPOLYLINE / POLYLINE
+    ├─ detectUnits()  →  mm vs m (avg area > 500 000 → mm, divide by 1 000 000)
+    ├─ matchTextsToRooms()  →  point-in-polygon → text label per room polygon
+    └─ DxfGeometryResult { rawRooms[], unitsDetected, layersUsed, ... }
+  aggregateRooms(geometry)
+    │
+    ├─ Pass 1: resolve ditto marks (" / " / ") to nearest preceding label
+    └─ Pass 2: normalise key (UPPERCASE + trim) → accumulate totalAreaForType
+    AggregateResult { resolvedLabels[], uniqueRoomInputs[], roomAggregates }
+  ── SSE: event: progress ("Parsing DXF geometry") ──
 
-  ── Phase 2: Parallel RAG — 6 queries ──────────────
-  buildRagQueries() → classificationQueries[2] + valueQueries[4]
-  Promise.all → searchSaudiCode() per query
-    │  each: FIFO cache check → HIT return | MISS ↓
+  ── Step 2: Parallel RAG — 4 queries ───────────────
+  buildRagQueries() → [string, string, string, string]
+  Promise.all → searchSaudiCode() × 4
     │  similaritySearchWithScore → embed → match_documents() RPC
     │  filter chunks below similarity 0.5
-    └─ Deduplicate → classificationContext + valueContext strings
+    └─ Returns 4-tuple of context strings
+  ── SSE: event: progress ("Retrieving Saudi code context") ──
 
-  ── Phase 3: AI Classification (categories only) ────
-  Deduplicate rooms by normalised label
-  classifyRooms(uniqueRooms, classificationContext)
+  ── Step 3: Single-pass AI ──────────────────────────
+  analyzeRooms(uniqueRoomInputs, ragContext, includeAC)
     ▼
-  generateText({ Output.object(ClassificationSchema) })
-    │  Returns per unique room:
-    │    { roomLabel, roomType, customerCategory,
+  generateObject({ schema: RoomAnalysisSchema })  →  Gemini Flash
+    │  Per unique room:
+    │    { roomLabel, roomType, customerCategory, categoryDescription,
+    │      loadDensityVAm2, demandFactor, loadsIncluded, acIncluded,
     │      codeReference, classificationReason }
-    │  NO density or factor values
+    │  C1/C2: AI interpolates totalAreaForType using Tables 3–6 inside prompt
+    │         → returns final VA/m² directly (no post-processing step)
+  ── SSE: event: progress ("Analyzing rooms with AI") ──
 
-  ── Phase 4: AI Value Extraction (per unique category) ─
-  extractCategoryValues(uniqueCategories, valueContext)
-    ▼
-  generateText({ Output.object(CategoryValuesSchema) })
-    │  Returns per category:
-    │    { loadDensityVAm2, loadsIncluded, demandFactor,
-    │      c1c2KvaTable?, c1c2ExtendedDensityVAm2? }
-
-  ── Phase 5: Load Computation ───────────────────────
-  For C1/C2: interpolateLoadTable(kvaTable, totalCategoryArea) → effective VA/m²
-  For each raw room:
-    connectedLoad = round2(loadDensityVAm2 × area)
-    demandLoad    = round2(connectedLoad × demandFactor × 1.0)
+  ── Step 4: Load Assembly ───────────────────────────
+  assembleLoads(geometry, analysisResults, resolvedLabels)
+    │  For each raw room: look up AI result by normalised key
+    │    Found → connectedLoad = loadDensityVAm2 × area
+    │    Missing → DxfRoom with null loads + error string
+  computeRoomDemandLoad(roomLoadInputs)
+    │  demandLoad = round2(connectedLoad × demandFactor × 1.0)
   computeBuildingSummary() → totals + categoryBreakdown[]
   Set hasFailedRooms = true if any room lacks AI output
+  ── SSE: event: progress ("Computing final loads") ──
+  ── SSE: event: result ({ ...DxfProcessResult }) ──
 
-[Server → Browser]
-  200 OK  DxfProcessResult {
-    success, rooms[], totalConnectedLoad, totalDemandLoad, totalDemandLoadKVA,
-    effectiveDemandFactor, coincidentFactor, categoryBreakdown[],
-    totalRooms, unitsDetected, hasFailedRooms, timestamp
-  }
+[Server → Browser]  (SSE stream)
+  event: progress  data: "Parsing DXF geometry"
+  event: progress  data: "Retrieving Saudi code context"
+  event: progress  data: "Analyzing rooms with AI"
+  event: progress  data: "Computing final loads"
+  event: result    data: { ...DxfProcessResult JSON }
 
 [Browser]
+  postProcessDxf() parses SSE line-by-line → calls onProgress() per step
+  useProcessDxf() updates progressStep → FileDropZone shows step indicator
   useCustomMutation onSuccess → pushSuccessToast
   ResultsDisplay.tsx renders:
     ├─ Summary card (total connected kVA, demand kVA, effective DF, room count)
@@ -256,18 +262,14 @@ The Supabase connection fails or env vars are missing, but the AI can still proc
   searchSaudiCode() throws (Supabase connection fails)
         │
         ▼
-  try/catch in dxf-load.post.ts swallows the error
-  classificationContext = ""  (empty string)
-  valueContext = ""
+  try/catch in orchestrator.ts swallows the error
+  ragContext = ["", "", "", ""]  (empty strings)
         │
         ▼
-  classifyRooms(rooms, "")
+  analyzeRooms(rooms, ragContext, includeAC)
         │  Prompt: "No code sections retrieved. Use engineering knowledge…"
         ▼
-  Gemini classifies rooms using pre-trained knowledge; codeReference fields may be less precise
-  extractCategoryValues(categories, "")
-        │  Gemini returns density/factor estimates from pre-training
-        ▼
+  Gemini classifies and estimates loads using pre-trained knowledge; codeReference fields may be less precise
   Pipeline continues normally with AI-estimated values
 
   [No error propagated to client — degraded mode is silent]
@@ -281,15 +283,15 @@ Gemini successfully responds but fails to classify one or more rooms (e.g., unre
 
 ```
 [Server]
-  classifyRooms() returns a partial classifications array
+  analyzeRooms() returns a partial results array (some rooms missing)
         │
         ▼
-  Merge loop in dxf-load.post.ts:
+  assembleLoads() merge loop:
     For each rawRoom:
-      ├─ Phase 1 result found?
-      │       YES → look up Phase 2 values → compute connectedLoad + demandLoad
+      ├─ AI result found (normalised key match)?
+      │       YES → connectedLoad = loadDensityVAm2 × area, demandLoad computed
       └─       NO  → DxfRoom with loadDensityVAm2=null, connectedLoad=null +
-                     error: "AI classification failed"
+                     error: "AI classification failed for this room"
 
   hasFailedRooms = true
   totalConnectedLoad / totalDemandLoad = sum of non-null room loads only
@@ -376,15 +378,17 @@ Next.js server start
 {
   id: number;
   name: string;                  // DXF label (ditto-resolved if applicable)
-  type: string;                  // normalised English room type from Phase 1 AI
+  type: string;                  // normalised English room type from AI
   customerCategory: string;      // DPS-01 category code, e.g. "C1"
+  categoryDescription: string;   // human-readable DPS-01 category name from AI
   area: number;                  // m²
-  loadDensityVAm2: number | null; // combined VA/m² from Phase 2 AI (null if AI failed)
+  loadDensityVAm2: number | null; // combined VA/m² from AI (null if AI failed)
   loadsIncluded: string | null;  // what the density covers, e.g. "Lights + AC + Sockets"
+  acIncluded: boolean | null;    // whether AC loads are included in the density
   connectedLoad: number | null;  // loadDensityVAm2 × area (VA)
   demandFactor: number | null;   // from DPS-01 Table 11
   demandLoad: number | null;     // connectedLoad × demandFactor (VA)
-  codeReference: string;         // DPS-01 section from Phase 1 AI
+  codeReference: string;         // DPS-01 section from AI
   error?: string;                // set when AI failed for this room
 }
 ```
@@ -431,11 +435,10 @@ Next.js server start
 
 Tests live under `tests/` mirroring `src/`:
 
-| Directory                   | Vitest Environment | Scope                                                                                                                         |
-| --------------------------- | ------------------ | ----------------------------------------------------------------------------------------------------------------------------- |
-| `tests/client/`             | `jsdom`            | `validateDxfFile`, `normalizeError`, `useCustomMutation`                                                                      |
-| `tests/server/unit/`        | `node`             | `dxf-processor` (mocked `dxf-parser`), `factors-calculator`                                                                   |
-| `tests/server/integration/` | `node`             | Full route handler (`processDxfFile`, `classifyRooms`, `extractCategoryValues`, `searchSaudiCode` all mocked via `vi.mock()`) |
+| Directory            | Vitest Environment | Scope                                                                                                                          |
+| -------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------ |
+| `tests/client/`      | `jsdom`            | `validateDxfFile`, `normalizeError`, `useCustomMutation`                                                                       |
+| `tests/server/unit/` | `node`             | `dxf-processor` (mocked `dxf-parser`), `factors-calculator`, `normalize`, `dxf-validator`, `room-aggregator`, `load-assembler` |
 
 ```bash
 npm test                # vitest watch

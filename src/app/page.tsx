@@ -7,7 +7,7 @@ import { Footer } from "@/components/layout/Footer";
 import { Header } from "@/components/layout/Header";
 
 export default function HomePage() {
-  const { mutate, data, isPending, reset, error } = useProcessDxf();
+  const { mutate, data, isPending, reset, error, progressStep } = useProcessDxf();
 
   const hasResults = data?.success && (data.rooms?.length ?? 0) > 0;
 
@@ -39,6 +39,7 @@ export default function HomePage() {
                 mutate({ file, electricalCode, includeAC })
               }
               isProcessing={isPending}
+              progressStep={progressStep}
             />
           </div>
         ) : (

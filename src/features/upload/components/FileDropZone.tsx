@@ -9,13 +9,15 @@ import { cn } from "@/lib/utils";
 import { MAX_UPLOAD_SIZE_MB } from "@/shared/constants";
 
 import { validateDxfFile } from "../utils/validateDxfFile";
+import { PipelineProgress } from "./PipelineProgress";
 
 interface FileDropZoneProps {
   isProcessing: boolean;
+  progressStep?: string | null;
   onProcess: (file: File) => void;
 }
 
-export function FileDropZone({ isProcessing, onProcess }: FileDropZoneProps) {
+export function FileDropZone({ isProcessing, progressStep, onProcess }: FileDropZoneProps) {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [dragActive, setDragActive] = useState(false);
   const [validationError, setValidationError] = useState<string | null>(null);
@@ -123,6 +125,7 @@ export function FileDropZone({ isProcessing, onProcess }: FileDropZoneProps) {
                 "Process File"
               )}
             </Button>
+            {isProcessing && <PipelineProgress currentStep={progressStep} />}
           </div>
         )}
       </div>

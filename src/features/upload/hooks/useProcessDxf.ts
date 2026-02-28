@@ -7,8 +7,12 @@ import type { DxfProcessResult } from "@/shared/types/dxf";
 import { postProcessDxf } from "../services/dxfService";
 
 export function useProcessDxf() {
-  return useCustomMutation<DxfProcessResult, File>({
-    mutationFn: postProcessDxf,
+  return useCustomMutation<
+    DxfProcessResult,
+    { file: File; electricalCode: string; includeAC: boolean }
+  >({
+    mutationFn: ({ file, electricalCode, includeAC }) =>
+      postProcessDxf(file, electricalCode, includeAC),
     successMessage: "Load calculation complete.",
     onSuccess: (data) => {
       if (data.hasFailedRooms) {

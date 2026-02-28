@@ -2,45 +2,34 @@ import { generateText, Output } from "ai";
 import { z } from "zod";
 
 import { geminiFlash } from "@/server/ai/gemini-client";
-import { normalizeRoomKey } from "@/server/utils/normalize";
 
-interface RoomInput {
+export interface RoomInput {
   name: string;
-  area: number; // m²
-  /** All text candidates found inside the room polygon — provides AI with extra context */
+  area: number;
+  totalAreaForType: number;
+  roomCount: number;
   allLabels?: string[];
 }
 
 const ClassificationSchema = z.object({
   classifications: z.array(
     z.object({
-      roomLabel: z.string().describe("Exact room label as given in the input list"),
-      roomType: z.string().describe("Normalised English room type"),
-      customerCategory: z.string().describe("DPS-01 customer category (e.g. C1, C2, C3)"),
-      lightingDensity: z
-        .number()
-        .nonnegative()
-        .describe("DPS-01 lighting load density in VA per m² for this room type"),
-      socketsDensity: z
-        .number()
-        .nonnegative()
-        .describe("DPS-01 receptacle/socket load density in VA per m² for this room type"),
-      demandFactor: z
-        .number()
-        .min(0)
-        .max(1)
-        .describe("DPS-01 demand factor (0–1) from the applicable demand factor table"),
-      coincidentFactor: z
-        .number()
-        .min(0)
-        .max(1)
-        .describe("DPS-01 coincident/diversity factor (0–1)"),
-      codeReference: z.string().describe("Applicable DPS-01 section or table reference"),
+      roomLabel: z.string().describe("Exact room label as given in the input — copy verbatim"),
+      roomType: z
+        .string()
+        .describe("Normalised English room type, e.g. 'Master Bedroom', 'Corridor'"),
+      customerCategory: z.string().describe("DPS-01 customer category code: one of C1 … C29"),
+      codeReference: z
+        .string()
+        .describe("DPS-01 section used, e.g. 'DPS-01 Table 2 — Customer Classification'"),
+      classificationReason: z
+        .string()
+        .describe("One sentence: why this room maps to the chosen category"),
     }),
   ),
 });
 
-type Classification = z.infer<typeof ClassificationSchema>["classifications"][number];
+export type Classification = z.infer<typeof ClassificationSchema>["classifications"][number];
 
 function buildClassificationPrompt(rooms: RoomInput[], codeContext: string): string {
   const roomsBlock = rooms
@@ -49,120 +38,166 @@ function buildClassificationPrompt(rooms: RoomInput[], codeContext: string): str
         r.allLabels && r.allLabels.length > 1
           ? ` (all text inside boundary: ${r.allLabels.map((l) => `"${l}"`).join(", ")})`
           : "";
-      return `${i + 1}. "${r.name}"${allLabelsStr} — area: ${r.area.toFixed(2)} m²`;
+      const countStr =
+        r.roomCount > 1
+          ? ` ×${r.roomCount} rooms — total area: ${r.totalAreaForType.toFixed(2)} m²`
+          : "";
+      return `${i + 1}. "${r.name}"${allLabelsStr}${countStr} — this instance: ${r.area.toFixed(2)} m²`;
     })
     .join("\n");
 
-  const codeBlock = codeContext.trim()
-    ? `CODE SECTIONS FROM THE SAUDI ELECTRICITY COMPANY LOAD ESTIMATION STANDARD (DPS-01):\n${codeContext}`
-    : "NO CODE SECTIONS WERE RETRIEVED. You MUST set lightingDensity: 0, socketsDensity: 0, demandFactor: 1.0, coincidentFactor: 1.0, and codeReference: 'NOT FOUND — no matching section retrieved' for every room. Do not guess or use any other source.";
+  return `You are an expert in the Saudi Electricity Company Load Estimation Standard DPS-01.
 
-  return `You are an electrical engineer applying the Saudi Electricity Company Distribution Planning Standard DPS-01 ("Estimation of Customer Load Guideline") to assign electrical load densities and demand factors to rooms in a building floor plan.
+Your ONLY task is to classify each room in a building floor plan to the correct
+DPS-01 customer category (C1–C29).
 
-You MUST follow this exact four-step reasoning process for EVERY room:
+DO NOT output any numbers.
+DO NOT output load densities, demand factors, or any calculated values.
+Those are extracted from the code separately after you return category codes.
 
-────────────────────────────────────────────────
-STEP 1 — NORMALISE THE ROOM LABEL
-────────────────────────────────────────────────
-Translate the raw room label into a standard English room type.
-Labels may be abbreviations, codes, or Arabic — infer the type from context.
-For each room, you receive either a single label OR a label plus all text found inside its boundary polygon. Use ALL available text candidates plus the room's area to determine the actual room type. Ignore sheet references (e.g. "AZ451"), door tags (e.g. "DT01"), dimension text, and annotation codes — these are CAD artifacts, not room names.
+══════════════════════════════════════════════════════════════
+DPS-01 TABLE 2 — CUSTOMER CATEGORY DEFINITIONS
+(Use as your primary reference. Retrieved text below may add detail.)
+══════════════════════════════════════════════════════════════
 
-Examples:
-  "BEDROOM_2" → Bedroom
-  "POWDER" → Powder Room
-  "STAIR" → Staircase
-  "M.BEDROOM_1" → Master Bedroom
-  "FIRE LOBBY" → Fire Lobby / Corridor
-  "MAID ROOM" → Maid Room
-  "غرفة" → Bedroom
-  "L2-013" → Circulation/Corridor
-  Unknown codes with large area → ask: does the surrounding text or area suggest Living Room, Hall, Reception?
+C1  — Normal Residential Dwelling
+      Villas, houses, apartments — each unit with its own KWH meter.
+      Rooms: bedroom, master bedroom, living room, dining room, kitchen, bathroom,
+      maid room, study, prayer room (ancillary), balcony, store room within unit.
 
-────────────────────────────────────────────────
-STEP 2 — DETERMINE THE BUILDING CUSTOMER CATEGORY (from the provided code)
-────────────────────────────────────────────────
-Look at ALL the room labels together and decide which DPS-01 customer category this
-building belongs to by consulting Table (1) in the retrieved code sections:
-  C1  → Normal Residential Dwelling (Bedrooms, Kitchens, Bathrooms, Living Rooms, Balconies, etc.)
-  C2  → Normal Commercial Shops (Shops, Stores, Display Areas, etc.)
-  C3–C17  → Other area-based facilities — find VA/m² in Table 7 of the provided code.
-  C18–C29 → Extended facility types — find VA/m² in Table 8 of the provided code.
+C2  — Normal Commercial Shops
+      Individual retail units, pharmacies, small commercial offices —
+      each with its own KWH meter.
 
-────────────────────────────────────────────────
-STEP 3 — LOOK UP THE LOAD DENSITY FROM THE CORRECT TABLE (from the provided code)
-────────────────────────────────────────────────
-Apply the load density from the matching table in the retrieved code sections:
+C3  — Furnished Flats / Serviced Apartments
+      Fully furnished rental apartments, hotel apartments, short-stay units.
 
-• C1 Residential (Section 10.0 of DPS-01, residential area-equivalent density = 145 VA/m²):
-    Habitable rooms (Bedroom, Living, Dining, Kitchen, Study, Family, Maid, Laundry, Hall) → 145 VA/m²
-    Wet rooms (Bathroom, WC, Powder Room, Toilet)                                          →  50 VA/m²
-    Circulation/outdoor (Balcony, Corridor, Staircase, Fire Lobby)                         →  60 VA/m²
-    Split: lightingDensity = 40% of density, socketsDensity = 60% of density.
-    codeReference: "Section 10.0 — Connected Loads Estimation for Normal Residential Dwelling (C1), DPS-01"
+C4  — Hotels and Motels
+      Full-service hotels, motels, resorts.
 
-• C2 Commercial (Section 11.0 of DPS-01) → 215 VA/m²; split 40/60.
-    codeReference: "Section 11.0 — Connected Loads Estimation for Normal Commercial Shops (C2), DPS-01"
+C5  — Hospitals and Medical Centres
+      In-patient hospitals, surgery centres, specialist medical facilities.
 
-• C3–C17 → use aggregate VA/m² from Table 7 in the retrieved code; split 40/60.
+C6  — Schools, Colleges and Educational Institutes
+      Primary, secondary, university, training institutes.
 
-• C18–C29 → use aggregate VA/m² from Table 8 in the retrieved code; split 40/60.
+C7  — Offices
+      All office types: corporate, private, government administration.
+      Rooms: open-plan office, private office, meeting room, boardroom,
+      reception within an office building, print room, server room in office.
 
-────────────────────────────────────────────────
-STEP 4 — DETERMINE DEMAND & COINCIDENT FACTORS (from the provided code)
-────────────────────────────────────────────────
-Look up the demand factor and coincident factor from the DPS-01 tables in the provided code:
+C8  — Banks and Financial Institutions
 
-• Demand factor reduces the connected load to the expected maximum demand.
-  - C1 Residential: Use Table 2 or the applicable demand factor table from the provided code.
-    Typical residential demand factors range from 0.4 to 0.8 depending on total connected load.
-  - C2 Commercial: Use Table 3 or the applicable demand factor table from the provided code.
-  - C3–C29: Use the applicable tables (Tables 4–8) from the provided code.
-  - If no specific demand factor is found in the provided code, use 1.0 (conservative).
+C9  — Government and Public Buildings
+      Ministries, courts, municipalities, public service buildings.
 
-• Coincident factor (diversity factor) accounts for not all loads operating simultaneously:
-  - Look for diversity/coincident factor tables in the provided code sections.
-  - If no specific coincident factor is found, use 1.0 (conservative).
+C10 — Restaurants, Cafes and Food Service
+      Dine-in restaurants, fast food, cafeterias, coffee shops.
 
-IMPORTANT: The demand factor and coincident factor should be realistic values from the DPS-01 standard.
-Do NOT default to 1.0 unless the information genuinely cannot be found in the provided code sections.
+C11 — Common Areas and Services in Buildings
+      ALL shared and circulation spaces within ANY building type.
+      Rooms: corridor, hallway, lobby, entrance hall, staircase, stairwell,
+      lift shaft, lift lobby, plant room, generator room, electrical room,
+      pump room, service shaft, shared toilet / WC, fire escape corridor,
+      bin room, security room, building management room.
+      ALWAYS use C11 for these — regardless of what the rest of the building is.
 
-STRICT RULES:
-1. Use ONLY the code sections provided in the CODE SECTIONS block below. Do NOT use NEC, IEC, or any external source.
-2. Every non-zero density must be traceable to a specific section or table in the provided code text.
-3. If after following Steps 1–4 a room still cannot be matched, set lightingDensity: 0, socketsDensity: 0, demandFactor: 1.0, coincidentFactor: 1.0, codeReference: "NOT IN PROVIDED CODE SECTIONS".
+C12 — Supermarkets and Shopping Centres
+      Large retail, hypermarkets, shopping malls.
 
-${codeBlock}
+C13 — Indoor Car Parks and Garages
+      Standalone multi-storey parking, basement car parks as primary use.
 
-ROOMS FROM THE DXF DRAWING (label + floor area):
+C14 — Outdoor Car Parks and Petrol / Service Stations
+
+C15 — Car Showrooms and Automobile Dealerships
+
+C16 — Wedding Halls, Ballrooms and Social Clubs
+
+C17 — Sports Facilities, Gyms and Recreation Centres
+      Gyms, swimming pools, sports halls, courts, stadiums.
+
+C18 — Warehouses and Storage Facilities (Declared Load Method)
+
+C19 — Light Industrial / Workshops (Declared Load Method)
+
+C20 — Heavy Industrial (Declared Load Method)
+
+C21 — Mosques and Places of Worship
+
+C22 — Exhibition Centres and Conference Halls
+
+C23 — Cinemas, Theatres and Entertainment Venues
+
+C24 — Nurseries and Kindergartens
+
+C25 — Libraries and Cultural Centres
+
+C26 — Laundry and Dry-Cleaning Facilities
+
+C27 — Laboratories and Research Centres
+
+C28 — Fire Stations, Civil Defence and Emergency Services
+
+C29 — Mixed-Use Facilities
+      Buildings with two or more distinct uses sharing one meter.
+
+══════════════════════════════════════════════════════════════
+CLASSIFICATION RULES
+══════════════════════════════════════════════════════════════
+
+RULE 1 — BUILDING-LEVEL DECISION
+Look at the full room list together. The customer category is the building's
+primary use — assign it to all rooms of that use.
+Exception: always use C11 for all circulation and service spaces.
+
+RULE 2 — LABEL TRANSLATION
+Labels may be in Arabic, abbreviated, or coded.
+Use all text inside the room boundary AND the room area to determine type.
+Ignore sheet refs (AZ451), door tags (DT01), dimension text — CAD artifacts.
+
+Arabic quick-reference:
+  غرفة نوم / غرفة    → Bedroom
+  صالة / معيشة       → Living Room
+  مطبخ               → Kitchen
+  حمام / دورة مياه   → Bathroom
+  ممر / مدخل         → Corridor / Entrance
+  درج / سلم          → Staircase
+  مصعد               → Lift / Elevator
+  مكتب               → Office
+  متجر / محل         → Shop
+  مصلى               → Prayer Room
+  مخزن               → Store Room
+  غرفة خادمة         → Maid Room
+  قاعة               → Hall / Meeting Room
+
+RULE 3 — MIXED-USE BUILDINGS
+If the drawing clearly shows multiple uses (e.g. ground floor shops + upper floor apartments),
+classify each zone to its own category. Multiple codes may appear in the output.
+
+RULE 4 — C18–C29 FLAG
+For any C18–C29 room, append to codeReference:
+  "Declared Load Method required — area-based density not applicable (DPS-01 Section 20)"
+
+══════════════════════════════════════════════════════════════
+DPS-01 CLASSIFICATION TEXT (retrieved):
+${codeContext.trim() || "NO SECTIONS RETRIEVED — rely on Table 2 definitions above."}
+══════════════════════════════════════════════════════════════
+
+ROOMS FROM DXF DRAWING:
 ${roomsBlock}
 
-For EVERY room above, return exactly one classification entry with:
-- roomLabel: the exact label string as shown above
-- roomType: normalised English room type from Step 1
-- customerCategory: the DPS-01 customer category (e.g. "C1", "C2") from Step 2
-- lightingDensity: VA/m² (lighting portion only) from Step 3
-- socketsDensity: VA/m² (sockets portion only) from Step 3
-- demandFactor: demand factor (0–1) from Step 4
-- coincidentFactor: coincident/diversity factor (0–1) from Step 4
-- codeReference: exact section/table reference from the provided code
-
-Return DENSITIES ONLY (VA per m²) — do NOT multiply by the room area. The server computes absolute loads.
-Return exactly ${rooms.length} classification entries, one per room label.`;
+══════════════════════════════════════════════════════════════
+Return exactly ${rooms.length} entries — one per room label above.`;
 }
 
 /**
- * Classifies rooms against DPS-01 via Gemini, returning VA/m² load densities
- * and demand/coincident factors per room type.
- * Absolute loads are computed server-side by multiplying density × each room's actual area.
+ * Phase 1: classifies rooms to DPS-01 category codes only.
+ * No numerical values are produced — densities and factors come from Phase 2.
  *
- * @throws Error with descriptive message on AI failure (caller decides how to handle)
+ * @throws Error on AI failure (caller decides how to handle)
  */
-export async function classifyRooms(
-  rooms: RoomInput[],
-  codeContext: string,
-): Promise<Classification[]> {
-  // Deduplication is handled by the caller — no redundant dedup here
+export async function classifyRooms(rooms: RoomInput[], codeContext: string) {
   const { output } = await generateText({
     model: geminiFlash,
     output: Output.object({ schema: ClassificationSchema }),

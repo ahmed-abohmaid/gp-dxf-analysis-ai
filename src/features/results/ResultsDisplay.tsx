@@ -23,6 +23,7 @@ export function ResultsDisplay({ results, onReset }: ResultsDisplayProps) {
   const totalDemandLoad = results.totalDemandLoad ?? totalConnectedLoad;
   const totalDemandLoadKVA = results.totalDemandLoadKVA ?? totalDemandLoad / 1000;
   const effectiveDemandFactor = results.effectiveDemandFactor ?? 1;
+  const coincidentFactor = results.coincidentFactor ?? 1.0;
   const categoryBreakdown = results.categoryBreakdown ?? [];
 
   return (
@@ -51,6 +52,10 @@ export function ResultsDisplay({ results, onReset }: ResultsDisplayProps) {
               </p>
               <p className="mt-1 text-xs text-gray-400">
                 Effective demand factor: {(effectiveDemandFactor * 100).toFixed(0)}%
+              </p>
+              <p className="mt-1 text-xs text-gray-400">
+                Coincident factor: {coincidentFactor.toFixed(2)}
+                <span className="ml-1 text-gray-300">(single KWH meter)</span>
               </p>
             </>
           }

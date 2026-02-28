@@ -18,6 +18,9 @@ export interface RoomLoadInput {
   coincidentFactor: number; // 0–1
   customerCategory: string; // e.g. "C1"
   roomType: string; // e.g. "Bedroom"
+  loadDensityVAm2: number;
+  loadsIncluded: string;
+  acIncluded: boolean | null;
 }
 
 interface RoomLoadResult {
@@ -95,6 +98,9 @@ export function computeBuildingSummary(rooms: RoomLoadInput[]): BuildingLoadSumm
       roomCount: number;
       demandFactorSum: number;
       coincidentFactorSum: number;
+      loadDensityVAm2: number;
+      loadsIncluded: string;
+      acIncluded: boolean | null;
     }
   >();
 
@@ -117,6 +123,9 @@ export function computeBuildingSummary(rooms: RoomLoadInput[]): BuildingLoadSumm
         roomCount: 1,
         demandFactorSum: room.demandFactor,
         coincidentFactorSum: room.coincidentFactor,
+        loadDensityVAm2: room.loadDensityVAm2,
+        loadsIncluded: room.loadsIncluded,
+        acIncluded: room.acIncluded,
       });
     }
   }
@@ -131,6 +140,9 @@ export function computeBuildingSummary(rooms: RoomLoadInput[]): BuildingLoadSumm
       demandFactor: round2(data.demandFactorSum / data.roomCount),
       coincidentFactor: round2(data.coincidentFactorSum / data.roomCount),
       demandLoad: round2(data.demandLoad),
+      loadDensityVAm2: data.loadDensityVAm2,
+      loadsIncluded: data.loadsIncluded,
+      acIncluded: data.acIncluded,
     }));
 
   return {

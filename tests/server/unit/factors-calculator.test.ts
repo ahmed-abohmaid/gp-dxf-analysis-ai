@@ -6,11 +6,19 @@ import {
   type RoomLoadInput,
 } from "@/server/services/factors-calculator";
 
+// Fields added in Phase 2; irrelevant to the demand-load math being tested here
+const X: Pick<RoomLoadInput, "loadDensityVAm2" | "loadsIncluded" | "acIncluded"> = {
+  loadDensityVAm2: 100,
+  loadsIncluded: "Lights + Power Sockets",
+  acIncluded: null,
+};
+
 // ── computeRoomDemandLoad ──────────────────────────────────────────────────────
 
 describe("computeRoomDemandLoad", () => {
   it("computes demand load as connectedLoad × demandFactor × coincidentFactor", () => {
     const result = computeRoomDemandLoad({
+      ...X,
       connectedLoad: 384,
       demandFactor: 0.6,
       coincidentFactor: 1.0,
@@ -25,6 +33,7 @@ describe("computeRoomDemandLoad", () => {
 
   it("applies both demand and coincident factors", () => {
     const result = computeRoomDemandLoad({
+      ...X,
       connectedLoad: 1000,
       demandFactor: 0.8,
       coincidentFactor: 0.75,
@@ -37,6 +46,7 @@ describe("computeRoomDemandLoad", () => {
 
   it("returns connectedLoad unchanged when both factors are 1.0", () => {
     const result = computeRoomDemandLoad({
+      ...X,
       connectedLoad: 500,
       demandFactor: 1.0,
       coincidentFactor: 1.0,
@@ -48,6 +58,7 @@ describe("computeRoomDemandLoad", () => {
 
   it("returns 0 demand load when connected load is 0", () => {
     const result = computeRoomDemandLoad({
+      ...X,
       connectedLoad: 0,
       demandFactor: 0.8,
       coincidentFactor: 0.9,
@@ -59,6 +70,7 @@ describe("computeRoomDemandLoad", () => {
 
   it("rounds to 2 decimal places", () => {
     const result = computeRoomDemandLoad({
+      ...X,
       connectedLoad: 100,
       demandFactor: 0.3,
       coincidentFactor: 0.7,
@@ -85,6 +97,7 @@ describe("computeBuildingSummary", () => {
   it("sums a single room correctly", () => {
     const rooms: RoomLoadInput[] = [
       {
+        ...X,
         connectedLoad: 384,
         demandFactor: 0.6,
         coincidentFactor: 1.0,
@@ -107,6 +120,7 @@ describe("computeBuildingSummary", () => {
   it("groups multiple rooms in the same category", () => {
     const rooms: RoomLoadInput[] = [
       {
+        ...X,
         connectedLoad: 300,
         demandFactor: 0.6,
         coincidentFactor: 1.0,
@@ -114,6 +128,7 @@ describe("computeBuildingSummary", () => {
         roomType: "Bedroom",
       },
       {
+        ...X,
         connectedLoad: 200,
         demandFactor: 0.6,
         coincidentFactor: 1.0,
@@ -131,6 +146,7 @@ describe("computeBuildingSummary", () => {
   it("produces separate category breakdown entries for different categories", () => {
     const rooms: RoomLoadInput[] = [
       {
+        ...X,
         connectedLoad: 300,
         demandFactor: 0.6,
         coincidentFactor: 1.0,
@@ -138,6 +154,7 @@ describe("computeBuildingSummary", () => {
         roomType: "Bedroom",
       },
       {
+        ...X,
         connectedLoad: 500,
         demandFactor: 0.8,
         coincidentFactor: 1.0,
@@ -158,6 +175,7 @@ describe("computeBuildingSummary", () => {
   it("computes effective demand factor as ratio of demand to connected load", () => {
     const rooms: RoomLoadInput[] = [
       {
+        ...X,
         connectedLoad: 1000,
         demandFactor: 0.5,
         coincidentFactor: 1.0,
@@ -173,6 +191,7 @@ describe("computeBuildingSummary", () => {
   it("sets effectiveDemandFactor to 0 when totalConnectedLoad is 0", () => {
     const rooms: RoomLoadInput[] = [
       {
+        ...X,
         connectedLoad: 0,
         demandFactor: 0.6,
         coincidentFactor: 1.0,
@@ -187,6 +206,7 @@ describe("computeBuildingSummary", () => {
   it("converts total to kVA correctly", () => {
     const rooms: RoomLoadInput[] = [
       {
+        ...X,
         connectedLoad: 2000,
         demandFactor: 1.0,
         coincidentFactor: 1.0,

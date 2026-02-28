@@ -30,11 +30,16 @@ export default function HomePage() {
                 Upload Your AutoCAD DXF for Load Estimation
               </h2>
               <p className="text-gray-600">
-                Upload a DXF file to run automated room-by-room electrical load calculations
-                (lighting &amp; socket loads)
+                AI-powered room-by-room electrical load estimation per DPS-01 (Saudi Electricity
+                Company Standard)
               </p>
             </div>
-            <FileUpload onFileSelect={(file) => mutate(file)} isProcessing={isPending} />
+            <FileUpload
+              onFileSelect={(file, electricalCode, includeAC) =>
+                mutate({ file, electricalCode, includeAC })
+              }
+              isProcessing={isPending}
+            />
           </div>
         ) : (
           <ResultsDisplay results={data!} onReset={reset} />

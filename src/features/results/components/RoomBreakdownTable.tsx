@@ -37,8 +37,8 @@ export function RoomBreakdownTable({
           <div>
             <CardTitle>Room Load Breakdown</CardTitle>
             <CardDescription>
-              Detailed electrical load estimation by room — hover load values to see AI density
-              (VA/m²)
+              DPS-01 room-by-room load estimation — hover category badge for loads included, hover
+              connected load for density calculation
             </CardDescription>
           </div>
         </div>
@@ -52,11 +52,9 @@ export function RoomBreakdownTable({
               <TableHead className="font-semibold">Type</TableHead>
               <TableHead className="font-semibold">Cat.</TableHead>
               <TableHead className="text-right font-semibold">Area (m²)</TableHead>
-              <TableHead className="text-right font-semibold">Lighting (VA)</TableHead>
-              <TableHead className="text-right font-semibold">Sockets (VA)</TableHead>
+              <TableHead className="text-right font-semibold">VA/m²</TableHead>
               <TableHead className="text-right font-semibold">Connected (VA)</TableHead>
               <TableHead className="text-right font-semibold">DF</TableHead>
-              <TableHead className="text-right font-semibold">CF</TableHead>
               <TableHead className="text-right font-semibold">Demand (VA)</TableHead>
               <TableHead className="font-semibold">Code Ref</TableHead>
             </TableRow>
@@ -80,7 +78,13 @@ export function RoomBreakdownTable({
                 </TableCell>
                 <TableCell>
                   {room.customerCategory ? (
-                    <CategoryBadge category={room.customerCategory} />
+                    <CategoryBadge
+                      category={room.customerCategory}
+                      loadsIncluded={room.loadsIncluded}
+                      loadDensityVAm2={room.loadDensityVAm2}
+                      codeReference={room.codeReference}
+                      acIncluded={room.acIncluded}
+                    />
                   ) : (
                     <Dash />
                   )}
@@ -89,29 +93,18 @@ export function RoomBreakdownTable({
                   {formatNumber(room.area, 2)}
                 </TableCell>
                 <TableCell className="text-right tabular-nums">
-                  <LoadCell
-                    value={room.lightingLoad}
-                    density={room.lightingDensity}
-                    area={room.area}
-                    label="Lighting"
-                  />
-                </TableCell>
-                <TableCell className="text-right tabular-nums">
-                  <LoadCell
-                    value={room.socketsLoad}
-                    density={room.socketsDensity}
-                    area={room.area}
-                    label="Sockets"
-                  />
+                  <DensityCell room={room} />
                 </TableCell>
                 <TableCell className="text-right font-semibold tabular-nums">
-                  <LoadCell value={room.connectedLoad} />
+                  <LoadCell
+                    value={room.connectedLoad}
+                    density={room.loadDensityVAm2}
+                    area={room.area}
+                    label="Combined"
+                  />
                 </TableCell>
                 <TableCell className="text-right text-xs tabular-nums">
                   <FactorCell value={room.demandFactor} />
-                </TableCell>
-                <TableCell className="text-right text-xs tabular-nums">
-                  <FactorCell value={room.coincidentFactor} />
                 </TableCell>
                 <TableCell className="text-right font-semibold text-blue-600 tabular-nums">
                   <LoadCell value={room.demandLoad} />
@@ -122,15 +115,13 @@ export function RoomBreakdownTable({
               </TableRow>
             ))}
             <TableRow className="bg-gray-50 font-semibold">
-              <TableCell colSpan={7} className="text-right text-sm">
+              <TableCell colSpan={6} className="text-right text-sm">
                 Total Connected Load:
               </TableCell>
               <TableCell className="text-right tabular-nums">
                 {formatNumber(totalConnectedLoad, 0)} VA
               </TableCell>
-              <TableCell colSpan={2} className="text-right text-sm">
-                Total Demand Load:
-              </TableCell>
+              <TableCell className="text-right text-sm">Total Demand Load:</TableCell>
               <TableCell className="text-right text-blue-600 tabular-nums">
                 {formatNumber(totalDemandLoad, 0)} VA
               </TableCell>
@@ -140,5 +131,37 @@ export function RoomBreakdownTable({
         </Table>
       </CardContent>
     </Card>
+  );
+}
+
+function DensityCell({ room }: { room: DxfRoom }) {
+  if (!room.customerCategory) return <Dash />;
+
+  const category = room.customerCategory;
+  const isC1orC2 = category === "C1" || category === "C2";
+  const isDeclared = /^C(1[89]|2\d)$/.test(category);
+
+  if (isDeclared) {
+    return (
+      <span className="cursor-default text-xs text-gray-400" title="Declared Load Method">
+        —
+      </span>
+    );
+  }
+
+  if (room.loadDensityVAm2 == null) return <Dash />;
+
+  return (
+    <span className="tabular-nums">
+      {formatNumber(room.loadDensityVAm2, 0)}
+      {isC1orC2 && (
+        <span
+          className="ml-0.5 text-[10px] text-gray-400"
+          title="Effective density from DPS-01 Table 4/6 interpolation"
+        >
+          *
+        </span>
+      )}
+    </span>
   );
 }
